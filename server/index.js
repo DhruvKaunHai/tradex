@@ -1,0 +1,242 @@
+/* TradeX server. Plain Node.js (18 or newer), no packages to install.
+   - keeps 5 minute candles for NIFTY and BANKNIFTY in the data folder
+   - builds 15 and 30 minute candles from them
+   - follows the live price and pushes it to open browsers
+   - serves the website from the web folder */
+'use strict';
+const http = require('http'), fs = require('fs'), path = require('path'), zlib = require('zlib');
+
+const PORT = +process.env.PORT || 8080;
+const ROOT = path.join(__dirname, '..');
+const WEB = path.join(ROOT, 'web');
+const DATA = process.env.DATA_DIR || path.join(ROOT, 'data');
+const SEED_URL = (process.env.SEED_URL || 'https://tradex-terminal-de4w.onrender.com').replace(/\/$/, '');
+const YAHOO = (process.env.YAHOO_BASE || 'https://query1.finance.yahoo.com').replace(/\/$/, '');
+const POLL_MS = Math.max(1000, +process.env.POLL_MS || 2000);
+const IDLE_POLL_MS = Math.max(500, +process.env.IDLE_POLL_MS || 60000); // how often to look when the market is shut
+const ORIGIN = process.env.ALLOW_ORIGIN || '*';
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+const IST = 19800, OPEN_MIN = 555, CLOSE_MIN = 930; // 9:15 to 15:30
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+const SYMBOLS = {
+  NIFTY: { name: 'NIFTY 50', yahoo: '^NSEI', seed: '^NSEI' },
+  BANKNIFTY: { name: 'BANK NIFTY', yahoo: '^NSEBANK', seed: '^NSEBANK' }
+};
+const store = {};
+for (const s in SYMBOLS) store[s] = { t: [], o: [], h: [], l: [], c: [], ver: 0, dirty: false, cache: {}, price: null, priceAt: 0, prevClose: null, source: '', lastOk: 0, lastErr: '', fails: 0, seeded: false };
+
+const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+const minOfDay = t => Math.floor(((t + IST) % 86400) / 60);
+const dayOf = t => Math.floor((t + IST) / 86400);
+const validBar = b => Number.isFinite(b[0]) && b[0] % 300 === 0 && minOfDay(b[0]) >= OPEN_MIN && minOfDay(b[0]) < CLOSE_MIN &&
+  [b[1], b[2], b[3], b[4]].every(x => Number.isFinite(x) && x > 0) && b[2] >= b[3];
+
+/* ---------- storage ---------- */
+function load(sym) {
+  const f = path.join(DATA, sym + '_5m.json');
+  if (!fs.existsSync(f)) return;
+  try { const j = JSON.parse(fs.readFileSync(f, 'utf8')); const S = store[sym]; for (const k of ['t', 'o', 'h', 'l', 'c']) S[k] = j[k] || []; S.ver++; log(sym, 'loaded', S.t.length, 'candles from disk'); }
+  catch (e) { log(sym, 'could not read saved data:', e.message); }
+}
+function save(sym) {
+  const S = store[sym]; if (!S.dirty) return; S.dirty = false;
+  try { fs.mkdirSync(DATA, { recursive: true }); const f = path.join(DATA, sym + '_5m.json'); fs.writeFileSync(f + '.tmp', JSON.stringify({ t: S.t, o: S.o, h: S.h, l: S.l, c: S.c })); fs.renameSync(f + '.tmp', f); }
+  catch (e) { log(sym, 'could not save data:', e.message); }
+}
+// bars: [[t,o,h,l,c], ...]. overwrite=false keeps what is already stored.
+function merge(sym, bars, overwrite) {
+  const S = store[sym]; bars = bars.filter(validBar); if (!bars.length) return 0;
+  let changed = 0; const n = S.t.length;
+  if (n && bars.every(b => b[0] >= S.t[Math.max(0, n - 400)])) { // quick path: only the recent end
+    for (const b of bars) {
+      let k = S.t.length - 1; while (k >= 0 && S.t[k] > b[0]) k--;
+      if (k >= 0 && S.t[k] === b[0]) { if (overwrite && (S.o[k] !== b[1] || S.h[k] !== b[2] || S.l[k] !== b[3] || S.c[k] !== b[4])) { S.o[k] = b[1]; S.h[k] = b[2]; S.l[k] = b[3]; S.c[k] = b[4]; changed++; } }
+      else { S.t.splice(k + 1, 0, b[0]); S.o.splice(k + 1, 0, b[1]); S.h.splice(k + 1, 0, b[2]); S.l.splice(k + 1, 0, b[3]); S.c.splice(k + 1, 0, b[4]); changed++; }
+    }
+  } else {
+    const m = new Map(); for (let i = 0; i < n; i++) m.set(S.t[i], [S.t[i], S.o[i], S.h[i], S.l[i], S.c[i]]);
+    for (const b of bars) { if (!m.has(b[0])) { m.set(b[0], b); changed++; } else if (overwrite) { m.set(b[0], b); changed++; } }
+    const all = [...m.values()].sort((a, b) => a[0] - b[0]);
+    S.t = all.map(b => b[0]); S.o = all.map(b => b[1]); S.h = all.map(b => b[2]); S.l = all.map(b => b[3]); S.c = all.map(b => b[4]);
+  }
+  if (changed) { S.ver++; S.dirty = true; }
+  return changed;
+}
+function aggregate(sym, tf) {
+  const S = store[sym]; if (tf === 5) return { t: S.t, o: S.o, h: S.h, l: S.l, c: S.c };
+  const out = { t: [], o: [], h: [], l: [], c: [] }; let key = -1, k = -1;
+  for (let i = 0; i < S.t.length; i++) {
+    const d = dayOf(S.t[i]), slot = Math.floor((minOfDay(S.t[i]) - OPEN_MIN) / tf), kk = d * 100 + slot;
+    if (kk !== key) { key = kk; k++; out.t.push(d * 86400 - IST + (OPEN_MIN + slot * tf) * 60); out.o.push(S.o[i]); out.h.push(S.h[i]); out.l.push(S.l[i]); out.c.push(S.c[i]); }
+    else { if (S.h[i] > out.h[k]) out.h[k] = S.h[i]; if (S.l[i] < out.l[k]) out.l[k] = S.l[i]; out.c[k] = S.c[i]; }
+  }
+  return out;
+}
+
+/* ---------- outside data ---------- */
+async function getJson(url, ms) {
+  const ac = new AbortController(), timer = setTimeout(() => ac.abort(), ms || 15000);
+  try { const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: ac.signal }); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); }
+  finally { clearTimeout(timer); }
+}
+async function seedFromOldSite(sym) {
+  const url = `${SEED_URL}/api/candles?symbol=${encodeURIComponent(SYMBOLS[sym].seed)}&timeframe=5m&year=all`;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const j = await getJson(url, 120000); const rows = (j && j.candles) || [];
+      const added = merge(sym, rows.map(b => [b.time, b.open, b.high, b.low, b.close]), false);
+      log(sym, `history site gave ${rows.length} candles, ${added} new`); return rows.length;
+    } catch (e) { log(sym, `history site try ${attempt} failed: ${e.message}`); await new Promise(r => setTimeout(r, 15000)); }
+  }
+  return 0;
+}
+function yahooBars(j) {
+  const r = j && j.chart && j.chart.result && j.chart.result[0]; if (!r) throw new Error((j && j.chart && j.chart.error && j.chart.error.description) || 'empty reply');
+  const ts = r.timestamp || [], q = (r.indicators && r.indicators.quote && r.indicators.quote[0]) || {}, m = new Map();
+  for (let i = 0; i < ts.length; i++) {
+    const o = q.open[i], h = q.high[i], l = q.low[i], c = q.close[i]; if (o == null || h == null || l == null || c == null) continue;
+    const t = ts[i] - (ts[i] % 300), b = m.get(t);
+    if (!b) m.set(t, [t, o, h, l, c]); else { if (h > b[2]) b[2] = h; if (l < b[3]) b[3] = l; b[4] = c; }
+  }
+  return { bars: [...m.values()].sort((a, b) => a[0] - b[0]).map(b => b.map((x, k) => (k ? +x.toFixed(2) : x))), meta: r.meta || {} };
+}
+async function yahooHistory(sym) {
+  try {
+    const { bars } = yahooBars(await getJson(`${YAHOO}/v8/finance/chart/${encodeURIComponent(SYMBOLS[sym].yahoo)}?interval=5m&range=60d`, 30000));
+    const today = dayOf(Date.now() / 1000), added = merge(sym, bars.filter(b => dayOf(b[0]) < today), false) + merge(sym, bars.filter(b => dayOf(b[0]) === today), true);
+    log(sym, `Yahoo gave ${bars.length} recent candles, ${added} new`); return bars.length;
+  } catch (e) { log(sym, 'Yahoo history failed:', e.message); store[sym].lastErr = 'Yahoo: ' + e.message; return 0; }
+}
+
+/* ---------- live ---------- */
+const clients = new Set();
+function broadcast(obj) { const s = `data: ${JSON.stringify(obj)}\n\n`; for (const res of clients) { try { res.write(s); } catch (e) { clients.delete(res); } } }
+function applyTick(sym, price, ts) { // builds the running candle from single prices
+  const S = store[sym], t = ts - (ts % 300), n = S.t.length;
+  if (!validBar([t, price, price, price, price])) return null;
+  if (n && S.t[n - 1] === t) { if (price > S.h[n - 1]) S.h[n - 1] = price; if (price < S.l[n - 1]) S.l[n - 1] = price; S.c[n - 1] = price; S.ver++; S.dirty = true; }
+  else if (!n || S.t[n - 1] < t) merge(sym, [[t, price, price, price, price]], false);
+  const k = S.t.length - 1; return [S.t[k], S.o[k], S.h[k], S.l[k], S.c[k]];
+}
+async function pollYahoo(sym) {
+  const S = store[sym];
+  const { bars, meta } = yahooBars(await getJson(`${YAHOO}/v8/finance/chart/${encodeURIComponent(SYMBOLS[sym].yahoo)}?interval=1m&range=1d`, 8000));
+  const before = S.ver; merge(sym, bars, true);
+  const price = meta.regularMarketPrice, pt = meta.regularMarketTime;
+  let last = null;
+  if (Number.isFinite(price) && Number.isFinite(pt)) { last = applyTick(sym, +price.toFixed(2), pt); S.price = +price.toFixed(2); S.priceAt = pt; }
+  if (Number.isFinite(meta.chartPreviousClose)) S.prevClose = meta.chartPreviousClose; else if (Number.isFinite(meta.previousClose)) S.prevClose = meta.previousClose;
+  S.source = 'Yahoo Finance'; S.lastOk = Date.now(); S.fails = 0; S.lastErr = '';
+  if (S.ver !== before) { const k = S.t.length - 1; broadcast({ type: 'tick', s: sym, bar: last || [S.t[k], S.o[k], S.h[k], S.l[k], S.c[k]], price: S.price, at: S.priceAt, prev: S.prevClose }); }
+}
+async function pollOldSite(sym) {
+  const S = store[sym];
+  const j = await getJson(`${SEED_URL}/api/live/poll?symbol=${encodeURIComponent(SYMBOLS[sym].seed)}&timeframe=5m`, 8000);
+  const q = j && j.quote; if (!q || !Number.isFinite(q.price)) throw new Error('no quote');
+  if (q.is_open) { const bar = applyTick(sym, q.price, Math.floor(Date.now() / 1000)); if (bar) broadcast({ type: 'tick', s: sym, bar, price: q.price, at: Math.floor(Date.now() / 1000), prev: S.prevClose }); }
+  S.price = q.price; S.source = 'TradeX history site'; S.lastOk = Date.now();
+}
+function marketOpenNow() { const now = Date.now() / 1000, m = minOfDay(now), wd = new Date((now + IST) * 1000).getUTCDay(); return wd >= 1 && wd <= 5 && m >= OPEN_MIN - 1 && m <= CLOSE_MIN + 2; }
+function recentlyTicked() { const now = Date.now() / 1000; return Object.values(store).some(S => now - S.priceAt < 180); }
+let pollTimer = null;
+async function pollLoop() {
+  const fast = marketOpenNow() || recentlyTicked();
+  await Promise.all(Object.keys(SYMBOLS).map(async sym => {
+    const S = store[sym];
+    try { await pollYahoo(sym); }
+    catch (e) { S.fails++; S.lastErr = 'Yahoo: ' + e.message; if (S.fails >= 5 && fast) { try { await pollOldSite(sym); } catch (e2) { S.lastErr += ' | history site: ' + e2.message; } } }
+  }));
+  pollTimer = setTimeout(pollLoop, fast ? POLL_MS : IDLE_POLL_MS);
+}
+
+/* ---------- CSV import ---------- */
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/).filter(x => x.trim()); if (!lines.length) return [];
+  const split = s => s.split(/[,;\t]/).map(x => x.trim().replace(/^"|"$/g, ''));
+  let head = split(lines[0]).map(x => x.toLowerCase()), start = 1;
+  if (!head.some(h => /open|close|date|time/.test(h))) { head = head.length >= 6 ? ['date', 'time', 'open', 'high', 'low', 'close'] : ['datetime', 'open', 'high', 'low', 'close']; start = 0; }
+  const col = re => head.findIndex(h => re.test(h));
+  const iO = col(/^o(pen)?$/), iH = col(/^h(igh)?$/), iL = col(/^l(ow)?$/), iC = col(/^c(lose)?$/), iD = col(/date|timestamp|^datetime$|^dt$/), iT = head.findIndex((h, k) => k !== iD && /^time$/.test(h));
+  if (iO < 0 || iH < 0 || iL < 0 || iC < 0 || (iD < 0 && iT < 0)) throw new Error('The file needs date/time, open, high, low and close columns');
+  const toTs = (d, tm) => {
+    let s = (d || '') + (tm ? ' ' + tm : ''); s = s.trim();
+    if (/^\d{9,10}$/.test(s)) return +s; if (/^\d{12,13}$/.test(s)) return Math.floor(+s / 1000);
+    let m = /^(\d{4})[-\/]?(\d{2})[-\/]?(\d{2})[ T]+(\d{1,2}):(\d{2})/.exec(s);
+    if (m) { if (/[zZ]$/.test(s)) return Math.floor(Date.parse(s) / 1000); return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 1000 - IST; }
+    m = /^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})[ T]+(\d{1,2}):(\d{2})/.exec(s);
+    if (m) return Date.UTC(+m[3], +m[2] - 1, +m[1], +m[4], +m[5]) / 1000 - IST;
+    return NaN;
+  };
+  const m = new Map();
+  for (let i = start; i < lines.length; i++) {
+    const c = split(lines[i]), ts = toTs(iD >= 0 ? c[iD] : '', iT >= 0 ? c[iT] : ''); if (!Number.isFinite(ts)) continue;
+    const o = +c[iO], h = +c[iH], l = +c[iL], cl = +c[iC], t = ts - (ts % 300), b = m.get(t);
+    if (!b) m.set(t, [t, o, h, l, cl]); else { if (h > b[2]) b[2] = h; if (l < b[3]) b[3] = l; b[4] = cl; }
+  }
+  return [...m.values()].sort((a, b) => a[0] - b[0]);
+}
+
+/* ---------- web server ---------- */
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8', '.webmanifest': 'application/manifest+json' };
+function send(req, res, code, body, type, extra) {
+  const head = Object.assign({ 'Content-Type': type || 'application/json', 'Access-Control-Allow-Origin': ORIGIN, 'Access-Control-Allow-Headers': 'content-type,x-admin-key', Vary: 'Accept-Encoding' }, extra || {});
+  let buf = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+  if (buf.length > 1024 && /\bgzip\b/.test(req.headers['accept-encoding'] || '') && !head['Content-Encoding']) { buf = zlib.gzipSync(buf, { level: 6 }); head['Content-Encoding'] = 'gzip'; }
+  head['Content-Length'] = buf.length; res.writeHead(code, head); res.end(buf);
+}
+function statusOf(sym) {
+  const S = store[sym], n = S.t.length, days = new Set(); for (let i = 0; i < n; i++) days.add(dayOf(S.t[i]));
+  return { symbol: sym, name: SYMBOLS[sym].name, candles: n, days: days.size, first: n ? S.t[0] : null, last: n ? S.t[n - 1] : null, price: S.price ?? (n ? S.c[n - 1] : null), priceAt: S.priceAt, prevClose: S.prevClose, source: S.source, lastOk: S.lastOk, error: S.lastErr, seeded: S.seeded };
+}
+const server = http.createServer(async (req, res) => {
+  try {
+    const u = new URL(req.url, 'http://x'), p = u.pathname;
+    if (req.method === 'OPTIONS') return send(req, res, 204, '');
+    if (p === '/api/status') return send(req, res, 200, { ok: true, marketOpen: marketOpenNow(), serverTime: Math.floor(Date.now() / 1000), pollMs: POLL_MS, symbols: Object.keys(SYMBOLS).map(statusOf) }, null, { 'Cache-Control': 'no-store' });
+    if (p === '/api/candles') {
+      const sym = (u.searchParams.get('symbol') || 'NIFTY').toUpperCase(), tf = +u.searchParams.get('tf') || 5;
+      if (!store[sym] || ![5, 15, 30].includes(tf)) return send(req, res, 400, { error: 'Unknown symbol or timeframe' });
+      const S = store[sym]; let c = S.cache[tf];
+      if (!c || c.ver !== S.ver) { const a = aggregate(sym, tf); c = S.cache[tf] = { ver: S.ver, gz: zlib.gzipSync(JSON.stringify({ symbol: sym, tf, t: a.t, o: a.o, h: a.h, l: a.l, c: a.c }), { level: 6 }) }; }
+      if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) return send(req, res, 200, c.gz, 'application/json', { 'Content-Encoding': 'gzip', 'Cache-Control': 'no-store' });
+      return send(req, res, 200, zlib.gunzipSync(c.gz), 'application/json', { 'Cache-Control': 'no-store', 'Content-Encoding': 'identity' });
+    }
+    if (p === '/api/stream') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'Access-Control-Allow-Origin': ORIGIN, 'X-Accel-Buffering': 'no' });
+      res.write(`retry: 2000\ndata: ${JSON.stringify({ type: 'hello', marketOpen: marketOpenNow(), symbols: Object.keys(SYMBOLS).map(statusOf) })}\n\n`);
+      clients.add(res); req.on('close', () => clients.delete(res)); return;
+    }
+    if (p === '/api/import' && req.method === 'POST') {
+      if (ADMIN_KEY && req.headers['x-admin-key'] !== ADMIN_KEY) return send(req, res, 401, { error: 'Wrong admin key' });
+      const sym = (u.searchParams.get('symbol') || '').toUpperCase(); if (!store[sym]) return send(req, res, 400, { error: 'Unknown symbol' });
+      const chunks = []; let size = 0;
+      for await (const ch of req) { size += ch.length; if (size > 80 * 1024 * 1024) return send(req, res, 413, { error: 'File is larger than 80 MB' }); chunks.push(ch); }
+      let rows; try { rows = parseCsv(Buffer.concat(chunks).toString('utf8')); } catch (e) { return send(req, res, 400, { error: e.message }); }
+      const good = rows.filter(validBar), added = merge(sym, good, u.searchParams.get('overwrite') === '1'); save(sym);
+      return send(req, res, 200, { ok: true, rows: rows.length, inSession: good.length, added, total: store[sym].t.length });
+    }
+    if (p.startsWith('/api/')) return send(req, res, 404, { error: 'Not found' });
+    let rel = p === '/' ? '/index.html' : p === '/app' ? '/app.html' : p; rel = path.normalize(rel).replace(/^([/\\])+/, '');
+    const file = path.join(WEB, rel);
+    if (!file.startsWith(WEB) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return send(req, res, 404, 'Not found', 'text/plain');
+    return send(req, res, 200, fs.readFileSync(file), TYPES[path.extname(file)] || 'application/octet-stream', { 'Cache-Control': 'no-cache' });
+  } catch (e) { log('request failed:', e.message); try { send(req, res, 500, { error: 'Server error' }); } catch (_) { /* reply already started */ } }
+});
+
+async function boot() {
+  for (const sym in SYMBOLS) load(sym);
+  server.listen(PORT, () => log(`TradeX is running. Open http://localhost:${PORT}`));
+  for (const sym in SYMBOLS) {
+    const S = store[sym];
+    if (S.t.length < 1000) await seedFromOldSite(sym);
+    await yahooHistory(sym); S.seeded = true; save(sym);
+    broadcast({ type: 'reload', s: sym });
+  }
+  pollLoop();
+  setInterval(() => { for (const sym in SYMBOLS) save(sym); }, 60000);
+  setInterval(() => broadcast({ type: 'ping', marketOpen: marketOpenNow() }), 15000);
+  setInterval(() => { for (const sym in SYMBOLS) yahooHistory(sym); }, 6 * 3600 * 1000);
+}
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { for (const sym in SYMBOLS) save(sym); process.exit(0); });
+boot();

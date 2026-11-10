@@ -1,0 +1,331 @@
+/* TradeX workspace */
+(function () {
+'use strict';
+const { inr, sinr, f2, pct, cls, dstr, dtstr, esc } = TXReport;
+const $ = (s, r) => (r || document).querySelector(s), $$ = (s, r) => [...(r || document).querySelectorAll(s)];
+const API = (window.TX_API || '').replace(/\/$/, ''), IST = 19800;
+const PALETTE = ['#ffb224', '#7cc4ff', '#c59bff', '#ff8fb1', '#8be28b', '#5fe0e6', '#f59b6b', '#d6d06a'];
+const SYMS = { NIFTY: 'NIFTY 50', BANKNIFTY: 'BANK NIFTY' };
+const store = { get: (k, d) => { try { const v = localStorage.getItem('tx.' + k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }, set: (k, v) => { try { localStorage.setItem('tx.' + k, JSON.stringify(v)); } catch (e) { /* storage full or blocked */ } } };
+const uid = () => Math.random().toString(36).slice(2, 9);
+const toast = (msg, err) => { const t = document.createElement('div'); t.className = 'toast' + (err ? ' err' : ''); t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), err ? 6000 : 3200); };
+const download = (name, text) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
+
+const settings = Object.assign({ theme: 'dark', capital: '', qty: '', commission: '', slippage: '', from: '', to: '', pooc: false }, store.get('settings', {}));
+const A = { symbol: store.get('symbol', 'NIFTY'), tf: store.get('tf', 5), data: {}, status: {}, strats: [], view: 'chart', rep: {}, trd: {}, cmp: {}, marketOpen: false, serverOk: false, lastTick: 0, period: store.get('period', 'all') };
+let scripts = store.get('scripts', null);
+if (!scripts || !scripts.length) { scripts = TX_SAMPLES.slice(0, 2).map(s => ({ id: uid(), name: s.name, code: s.code, updated: Date.now() })); store.set('scripts', scripts); }
+let curId = store.get('cur', scripts[0].id); if (!scripts.find(s => s.id === curId)) curId = scripts[0].id;
+const cur = () => scripts.find(s => s.id === curId);
+const saveScripts = () => store.set('scripts', scripts);
+const saveOnChart = () => store.set('onchart', A.strats.map(s => ({ scriptId: s.scriptId, color: s.color, visible: s.visible, inputs: s.inputs })));
+
+/* ---------- data ---------- */
+const key = (s, tf) => s + '|' + tf;
+async function loadData(sym, tf, force) {
+  const k = key(sym, tf); if (A.data[k] && !force) return A.data[k];
+  const r = await fetch(`${API}/api/candles?symbol=${sym}&tf=${tf}`); if (!r.ok) throw new Error('The server did not return candles');
+  const j = await r.json(); return (A.data[k] = { t: j.t, o: j.o, h: j.h, l: j.l, c: j.c });
+}
+function applyTick(sym, bar) { // bar is a 5 minute candle [t,o,h,l,c]
+  let newBar = false;
+  for (const tf of [5, 15, 30]) {
+    const d = A.data[key(sym, tf)]; if (!d) continue; const n = d.t.length; let b = bar;
+    if (tf !== 5) { const day = Math.floor((bar[0] + IST) / 86400), m = Math.floor(((bar[0] + IST) % 86400) / 60), t = day * 86400 - IST + (555 + Math.floor((m - 555) / tf) * tf) * 60;
+      b = n && d.t[n - 1] === t ? [t, d.o[n - 1], Math.max(d.h[n - 1], bar[2]), Math.min(d.l[n - 1], bar[3]), bar[4]] : [t, bar[1], bar[2], bar[3], bar[4]]; }
+    if (n && b[0] < d.t[n - 1]) continue;
+    const isNew = !n || b[0] > d.t[n - 1];
+    if (sym === A.symbol && tf === A.tf) { chart.updateLast(b); if (isNew) newBar = true; }
+    else if (isNew) { d.t.push(b[0]); d.o.push(b[1]); d.h.push(b[2]); d.l.push(b[3]); d.c.push(b[4]); } else { d.o[n - 1] = b[1]; d.h[n - 1] = b[2]; d.l[n - 1] = b[3]; d.c[n - 1] = b[4]; }
+  }
+  if (newBar) { clearTimeout(applyTick.t); applyTick.t = setTimeout(() => runAll(true), 400); }
+}
+function connect() {
+  let es; const open = () => {
+    es = new EventSource(`${API}/api/stream`);
+    es.onmessage = e => { const m = JSON.parse(e.data); A.serverOk = true;
+      if (m.type === 'hello') { m.symbols.forEach(s => (A.status[s.symbol] = s)); A.marketOpen = m.marketOpen; paintSyms(); if (connect.was) { delete A.data[key(A.symbol, A.tf)]; switchData(true); } connect.was = true; }
+      else if (m.type === 'tick') { const st = A.status[m.s] || (A.status[m.s] = {}), old = st.price; st.price = m.price; st.priceAt = m.at; if (m.prev) st.prevClose = m.prev; A.lastTick = Date.now(); A.marketOpen = true; applyTick(m.s, m.bar); paintSyms(m.s, old); if (m.s === A.symbol) paintLegend(); }
+      else if (m.type === 'ping') A.marketOpen = m.marketOpen;
+      else if (m.type === 'reload') { for (const tf of [5, 15, 30]) delete A.data[key(m.s, tf)]; if (m.s === A.symbol) switchData(true); refreshStatus(); }
+      paintFeed(); };
+    es.onerror = () => { A.serverOk = false; paintFeed(); };
+  };
+  open();
+}
+async function refreshStatus() { try { const j = await (await fetch(`${API}/api/status`)).json(); j.symbols.forEach(s => (A.status[s.symbol] = Object.assign(A.status[s.symbol] || {}, s))); A.marketOpen = j.marketOpen; A.serverOk = true; paintSyms(); paintFeed(); if (A.view === 'data') renderData(); } catch (e) { A.serverOk = false; paintFeed(); } }
+
+/* ---------- top bar ---------- */
+function paintSyms(tickSym, old) {
+  const host = $('#syms'); if (!host.children.length) { host.innerHTML = Object.keys(SYMS).map(s => `<button class="sym" data-sym="${s}"><b>${SYMS[s]}</b><span class="px">–</span><span class="ch"></span></button>`).join(''); $$('.sym', host).forEach(b => (b.onclick = () => { A.symbol = b.dataset.sym; store.set('symbol', A.symbol); paintSyms(); switchData(); })); }
+  for (const b of $$('.sym', host)) { const s = b.dataset.sym, st = A.status[s] || {}; b.setAttribute('aria-pressed', s === A.symbol);
+    const px = $('.px', b), ch = $('.ch', b); if (st.price != null) { px.textContent = f2(st.price); if (s === tickSym && old != null && old !== st.price) { px.classList.remove('tick-up', 'tick-down'); void px.offsetWidth; px.classList.add(st.price > old ? 'tick-up' : 'tick-down'); }
+      if (st.prevClose) { const d = st.price - st.prevClose; ch.textContent = `${d >= 0 ? '+' : ''}${d.toFixed(2)} (${pct(d / st.prevClose * 100)})`; ch.className = 'ch ' + cls(d); } } }
+}
+function paintFeed() {
+  const el = $('#feed'), sp = $('span', el), st = A.status[A.symbol] || {}; el.className = 'feed';
+  if (!A.serverOk) { el.classList.add('err'); sp.textContent = 'Server not reachable, retrying'; return; }
+  if (A.marketOpen && Date.now() - A.lastTick < 20000) { el.classList.add('live'); const d = A.data[key(A.symbol, A.tf)]; let left = ''; if (d && d.t.length) { const s = d.t[d.t.length - 1] + A.tf * 60 - Date.now() / 1000; if (s > 0 && s < A.tf * 60) left = `, candle closes in ${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`; } sp.textContent = 'Live' + left; }
+  else if (A.marketOpen) { el.classList.add('err'); sp.textContent = st.error ? 'Live price source is not answering' : 'Waiting for live price'; }
+  else sp.textContent = 'Market closed' + (st.last ? `, last candle ${dtstr(st.last)}` : '');
+  el.title = st.source ? `Price source: ${st.source}${st.error ? '\nLast problem: ' + st.error : ''}` : 'Live feed';
+}
+function paintTf() { const seg = $('#tfs'); $$('button', seg).forEach(b => { const on = +b.dataset.tf === A.tf; b.setAttribute('aria-pressed', on); if (on) { const th = $('.thumb', seg); th.style.left = b.offsetLeft + 'px'; th.style.width = b.offsetWidth + 'px'; } }); }
+$$('#tfs button').forEach(b => (b.onclick = () => { A.tf = +b.dataset.tf; store.set('tf', A.tf); paintTf(); switchData(); }));
+$('#themeBtn').onclick = () => { settings.theme = settings.theme === 'dark' ? 'light' : 'dark'; applyTheme(); };
+function applyTheme() { document.documentElement.dataset.theme = settings.theme; store.set('settings', settings); chart.theme(); renderView(); }
+
+/* ---------- views ---------- */
+const VIEWS = ['chart', 'editor', 'report', 'trades', 'compare', 'data', 'settings'];
+function go(v) { if (!VIEWS.includes(v)) v = 'chart'; A.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v);
+  $$('.view').forEach(x => x.classList.toggle('on', x.id === 'v-' + v));
+  $$('#rail button').forEach(b => { const on = b.dataset.v === v; if (on) { b.setAttribute('aria-current', 'page'); $('#rail .glow').style.transform = `translateY(${b.offsetTop - 8}px)`; } else b.removeAttribute('aria-current'); });
+  renderView(); if (v === 'chart') { chart.resize(); } if (v === 'editor') syncEditor(); }
+function renderView() { const v = A.view, ctx = CTX; paintPeriod(); const PS = A.strats.map(inPeriod); if (v === 'report') TXReport.renderReport($('#v-report'), PS, A.rep, ctx); else if (v === 'trades') TXReport.renderTrades($('#v-trades'), PS, A.trd, ctx); else if (v === 'compare') TXReport.renderCompare($('#v-compare'), PS, A.cmp, ctx); else if (v === 'data') renderData(); else if (v === 'settings') renderSettings(); }
+$$('#rail button').forEach(b => (b.onclick = () => go(b.dataset.v)));
+document.addEventListener('click', e => { const g = e.target.closest('[data-go]'); if (g) go(g.dataset.go); });
+window.addEventListener('hashchange', () => go(location.hash.slice(1)));
+let rsz; window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { paintTf(); go(A.view); }, 150); });
+const CTX = {
+  goToTime: t => { go('chart'); setTimeout(() => chart.goToTime(t), 60); },
+  goToTrade: (S, tr) => { go('chart'); S = A.strats.find(x => x.id === S.id) || S; S.visible = true; paintDock(); pushLayers(); setTimeout(() => { const off = S.offset || 0, span = Math.max(40, (tr.xi - tr.ei) * 3); chart.showRange(Math.max(0, tr.ei + off - span / 3), Math.min(chart.n - 1, tr.xi + off + span / 3)); showTradeCard(S, tr); }, 60); },
+  showRange: (i0, i1) => { go('chart'); const S = A.strats.find(s => s.id === A.rep.sid), off = S ? (S.offset || 0) + (inPeriod(S).pOff || 0) : 0; setTimeout(() => chart.showRange(i0 + off, i1 + off), 60); },
+  filterTrades: (S, month, side) => { A.trd = { sid: S.id, month: month || null, side: side || 'all' }; go('trades'); },
+  download
+};
+
+/* ---------- period (year) filter for chart, report, trades and compare ---------- */
+const PERIOD_VIEWS = ['chart', 'report', 'trades', 'compare'];
+const yearOf = t => new Date((t + IST) * 1000).getUTCFullYear();
+const yearSpan = y => [Date.UTC(y, 0, 1) / 1000 - IST, Date.UTC(y + 1, 0, 1) / 1000 - IST];
+function periodYears() { const d = A.data[key(A.symbol, A.tf)]; if (!d || !d.t.length) return []; const ys = []; for (let y = yearOf(d.t[d.t.length - 1]); y >= yearOf(d.t[0]); y--) ys.push(y); return ys; }
+function inPeriod(S) { // a copy of the strategy with candles, equity, trades and numbers cut to the chosen year
+  if (A.period === 'all' || !S.result || !S.result.isStrategy || !S.data) return S;
+  const [a, b] = yearSpan(+A.period), t = S.data.t, R = S.result; let p0 = 0; while (p0 < t.length && t[p0] < a) p0++; let p1 = p0; while (p1 < t.length && t[p1] < b) p1++;
+  const cut = x => x.slice(p0, p1), data = { t: cut(t), o: cut(S.data.o), h: cut(S.data.h), l: cut(S.data.l), c: cut(S.data.c) };
+  const cap = p0 > 0 ? R.equity[p0 - 1] : R.capital, trades = R.trades.filter(x => x.xt >= a && x.xt < b), equity = R.equity.slice(p0, p1);
+  const result = Object.assign({}, R, { trades, equity, capital: cap });
+  return Object.assign({}, S, { data, result, metrics: data.t.length ? Metrics.compute(trades, equity, data.t, cap, data.c) : null, pOff: p0, period: A.period });
+}
+function paintPeriod() {
+  const el = $('#period'); if (!el) return; const ys = periodYears();
+  el.classList.toggle('hide', !PERIOD_VIEWS.includes(A.view) || !ys.length);
+  el.innerHTML = '<span>Period</span>' + ['all', ...ys].map(p => `<button data-p="${p}" aria-pressed="${String(A.period) === String(p)}">${p === 'all' ? 'All' : p}</button>`).join('');
+  $$('button', el).forEach(b => (b.onclick = () => setPeriod(b.dataset.p)));
+}
+function setPeriod(p) { A.period = p; store.set('period', p); pushLayers(); paintDock(); if (A.view === 'chart') { paintPeriod(); focusPeriod(); } else renderView(); }
+function focusPeriod() { const d = A.data[key(A.symbol, A.tf)]; if (!d || !d.t.length) return; if (A.period === 'all') return chart.fitAll(); const [a, b] = yearSpan(+A.period); let i0 = 0; while (i0 < d.t.length && d.t[i0] < a) i0++; let i1 = i0; while (i1 < d.t.length && d.t[i1] < b) i1++; if (i1 > i0) chart.showRange(i0, i1 - 1); }
+
+/* ---------- chart ---------- */
+const chart = new TXChart($('#chartHost'));
+let crossI = -1;
+chart.on('cross', e => { crossI = e.active ? e.index : -1; paintLegend(); });
+chart.on('view', e => $('#goLatest').classList.toggle('hide', !e.away));
+$('#goLatest').onclick = () => chart.goLatest();
+chart.on('click', e => { if (e.trade) { const S = A.strats.find(s => s.id === e.layer.id); showTradeCard(S, e.trade.ref || e.trade, true); } else $('#tradeCard').innerHTML = ''; });
+function paintLegend() {
+  const d = A.data[key(A.symbol, A.tf)], el = $('#legend'); if (!d || !d.t.length) { el.innerHTML = ''; return; }
+  const i = crossI >= 0 && crossI < d.t.length ? crossI : d.t.length - 1, ch = i > 0 ? d.c[i] - d.c[i - 1] : 0, c = d.c[i] >= d.o[i] ? 'up' : 'down';
+  let h = `<div class="row"><span class="name">${SYMS[A.symbol]}</span><span class="muted">${A.tf} min, ${dtstr(d.t[i])}</span><span><b>O</b><i class="${c}" style="font-style:normal">${f2(d.o[i])}</i></span><span><b>H</b><i class="${c}" style="font-style:normal">${f2(d.h[i])}</i></span><span><b>L</b><i class="${c}" style="font-style:normal">${f2(d.l[i])}</i></span><span><b>C</b><i class="${c}" style="font-style:normal">${f2(d.c[i])}</i></span><span class="${cls(ch)}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)}</span></div>`;
+  for (const S of A.strats) { if (!S.visible || !S.layer) continue; const vals = S.layer.plots.slice(0, 5).map(p => { const v = p.data[i]; return v === v ? `<span><b>${esc(p.title)}</b>${f2(v)}</span>` : ''; }).join(''); h += `<div class="row"><span><i class="dot" style="background:${S.color}"></i> ${esc(S.name)}</span>${vals}</div>`; }
+  el.innerHTML = h;
+}
+$$('#ranges button').forEach(b => (b.onclick = () => { const days = +b.dataset.r; if (!days) chart.fitAll(); else chart.showLast(Math.round(days * 375 / A.tf)); }));
+$('#jump').onchange = e => { if (e.target.value) chart.goToTime(Date.parse(e.target.value + 'T09:15:00+05:30') / 1000); };
+$('#dockToggle').onclick = () => { $('#dock').classList.toggle('closed'); setTimeout(() => chart.resize(), 300); };
+function showTradeCard(S, tr, atCursor) {
+  if (!S || !tr) return; const el = $('#tradeCard');
+  el.innerHTML = `<div class="tradecard"><b><i class="dot" style="background:${S.color}"></i> ${esc(S.name)}, trade ${tr.n}</b><dl><dt>Side</dt><dd class="${tr.dir > 0 ? 'up' : 'down'}">${tr.dir > 0 ? 'Long' : 'Short'} × ${tr.qty}</dd><dt>Entry</dt><dd>${f2(tr.ep)} at ${dtstr(tr.et)}</dd><dt>Exit</dt><dd>${f2(tr.xp)} at ${dtstr(tr.xt)}</dd><dt>Points</dt><dd class="${cls(tr.pnl)}" style="font-size:1.25em;font-weight:800">${tr.pts >= 0 ? '+' : '−'}${Math.abs(tr.pts).toFixed(1)} pts</dd><dt>Money</dt><dd class="${cls(tr.pnl)}" style="opacity:.8">${sinr(tr.pnl)}</dd><dt>Best / worst</dt><dd>+${tr.mfe.toFixed(1)} / −${tr.mae.toFixed(1)} pts</dd><dt>Held</dt><dd>${tr.bars} candles</dd><dt>Exit reason</dt><dd>${esc(tr.reason || 'Signal')}</dd></dl></div>`;
+  void atCursor;
+}
+async function switchData(keepView) {
+  const sym = A.symbol, tf = A.tf; chart.emptyText = 'Loading candles'; paintFeed();
+  try { const d = await loadData(sym, tf); if (sym !== A.symbol || tf !== A.tf) return; if (!d.t.length) { chart.emptyText = `No ${SYMS[sym]} candles yet. See the Data tab.`; chart.d = null; chart.n = 0; chart.draw(); } else chart.setData(d, tf, keepView === true); paintLegend(); paintPeriod(); runAll(keepView === true); }
+  catch (e) { chart.emptyText = 'Could not load candles. Is the TradeX server running?'; chart.d = null; chart.draw(); A.serverOk = false; paintFeed(); }
+}
+
+/* ---------- running strategies ---------- */
+const worker = new Worker('js/worker.js'), pending = new Map(); let runSeq = 0;
+worker.onmessage = e => { const m = e.data, p = pending.get(m.id); if (!p) return; if (m.progress !== undefined) { if (p.onProgress) p.onProgress(m.progress); return; } pending.delete(m.id); if (m.ok) p.resolve(m.result); else p.reject(m.error); };
+worker.onerror = e => { for (const p of pending.values()) p.reject({ message: 'The backtest engine stopped: ' + e.message, line: 0 }); pending.clear(); };
+function runPine(code, data, opt, onProgress) { return new Promise((resolve, reject) => { const id = ++runSeq; pending.set(id, { resolve, reject, onProgress }); worker.postMessage({ id, code, data, opt }); }); }
+function sliceData(d) {
+  let i0 = 0, i1 = d.t.length; const ts = (s, end) => Date.parse(s + (end ? 'T23:59:59' : 'T00:00:00') + '+05:30') / 1000;
+  if (settings.from) { const f = ts(settings.from); while (i0 < i1 && d.t[i0] < f) i0++; } if (settings.to) { const t = ts(settings.to, true); while (i1 > i0 && d.t[i1 - 1] > t) i1--; }
+  return { offset: i0, data: i0 === 0 && i1 === d.t.length ? d : { t: d.t.slice(i0, i1), o: d.o.slice(i0, i1), h: d.h.slice(i0, i1), l: d.l.slice(i0, i1), c: d.c.slice(i0, i1) } };
+}
+async function runStrat(S, quiet) {
+  const sc = scripts.find(x => x.id === S.scriptId), full = A.data[key(A.symbol, A.tf)]; if (!sc || !full || !full.t.length) return;
+  const sym = A.symbol, tf = A.tf, { offset, data } = sliceData(full), n = full.t.length; S.busy = true; S.name = sc.name; paintDock();
+  const num = v => (v === '' || v == null ? null : +v);
+  try {
+    const r = await runPine(sc.code, data, { tf, symbol: sym, inputs: S.inputs || {}, capital: num(settings.capital), qty: num(settings.qty), commission: num(settings.commission), slippage: num(settings.slippage), pooc: settings.pooc }, p => { if (!quiet && S.scriptId === curId) $('#prog').style.width = Math.round(p * 100) + '%'; });
+    if (sym !== A.symbol || tf !== A.tf) return;
+    S.result = r; S.error = null; S.data = data; S.offset = offset; S.tf = tf; S.symbol = sym; S.symbolName = SYMS[sym]; if (r.meta.title && !sc.named) S.name = sc.name;
+    S.metrics = r.isStrategy ? Metrics.compute(r.trades, r.equity, data.t, r.capital, data.c) : null;
+    const pad = (arr, Ctor, fill) => { if (!offset && arr.length === n) return arr; const out = new Ctor(n); if (fill !== undefined) out.fill(fill); out.set(arr.subarray ? arr.subarray(0, Math.min(arr.length, n - offset)) : arr, offset); return out; };
+    S.layer = { id: S.id, name: S.name, color: S.color, overlay: r.meta.overlay, visible: S.visible, plots: r.plots.map(p => ({ title: p.title, data: pad(p.data, Float64Array, NaN), ci: pad(p.ci, Uint8Array), pal: p.pal, width: p.width })), hlines: r.hlines, shapes: offset ? r.shapes.map(s => Object.assign({}, s, { i: s.i + offset })) : r.shapes, bg: offset ? r.bg.map(b => [b[0] + offset, b[1]]) : r.bg, trades: r.trades.map(t => ({ ei: t.ei + offset, xi: t.xi + offset, ep: t.ep, xp: t.xp, dir: t.dir, pnl: t.pnl, pts: t.pts, ref: t })) };
+  } catch (err) { S.error = err; S.result = null; S.layer = null; S.metrics = null; }
+  S.busy = false; paintDock(); pushLayers(); paintLegend(); if (!quiet && S.scriptId === curId) { $('#prog').style.width = '0'; afterRun(S); } if (['report', 'trades', 'compare'].includes(A.view)) renderView();
+}
+function pushLayers() { const yb = A.period === 'all' ? null : yearSpan(+A.period); chart.setLayers(A.strats.filter(s => s.layer).map(s => { const L = s.layer; if (!L.allTrades) L.allTrades = L.trades; return Object.assign(L, { visible: s.visible, color: s.color, trades: yb ? L.allTrades.filter(x => x.ref.xt >= yb[0] && x.ref.xt < yb[1]) : L.allTrades }); })); const c = $('#rail .count'); if (c) c.remove(); if (A.strats.length) { const b = document.createElement('i'); b.className = 'count'; b.textContent = A.strats.length; $('#rail [data-v="chart"]').appendChild(b); } }
+async function runAll(quiet) { for (const S of A.strats) await runStrat(S, quiet); }
+function addToChart(scriptId, inputs) { let S = A.strats.find(s => s.scriptId === scriptId); if (!S) { const used = A.strats.map(s => s.color); S = { id: uid(), scriptId, color: PALETTE.find(c => !used.includes(c)) || PALETTE[A.strats.length % PALETTE.length], visible: true, inputs: inputs || {} }; A.strats.push(S); saveOnChart(); } return S; }
+function paintDock() {
+  const el = $('#stratList');
+  if (!A.strats.length) { el.innerHTML = `<div class="empty" style="padding:20px 8px"><p>No strategy on the chart. Add as many as you like, they all run on the full history.</p><button class="btn primary" data-go="editor">Write or pick a strategy</button></div>`; return; }
+  el.innerHTML = A.strats.map(S => { const M = inPeriod(S).metrics; return `<div class="strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''}" data-id="${S.id}"><i class="dot" style="background:${S.color}"></i><span class="nm" title="${esc(S.name || '')}">${esc(S.name || 'Strategy')}</span><span class="acts"><button data-a="eye" title="${S.visible ? 'Hide' : 'Show'} on chart" aria-label="Show or hide">${S.visible ? '◉' : '○'}</button><button data-a="edit" title="Open in editor" aria-label="Edit">✎</button><button data-a="del" title="Remove from chart" aria-label="Remove">✕</button></span><span class="sub">${S.error ? `<span class="down">Line ${S.error.line || '?'}: ${esc(S.error.message)}</span>` : M ? `<span class="${cls(M.all.pts)}" style="font-weight:800">${M.all.pts >= 0 ? '+' : '−'}${Math.abs(M.all.pts).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts</span><span>${M.all.n} trades</span><span>${M.all.winRate.toFixed(0)}% won</span><span>DD ${M.dd.maxPct.toFixed(1)}%</span><span class="${cls(M.net)}" style="opacity:.75">${sinr(M.net)}</span>` : S.result ? '<span>Indicator, no trades</span>' : '<span>Waiting</span>'}</span></div>`; }).join('');
+  $$('.strat', el).forEach(row => { const S = A.strats.find(s => s.id === row.dataset.id); $$('button', row).forEach(b => (b.onclick = ev => { ev.stopPropagation(); const a = b.dataset.a; if (a === 'eye') { S.visible = !S.visible; } else if (a === 'del') { A.strats = A.strats.filter(x => x !== S); } else { openScript(S.scriptId); go('editor'); return; } saveOnChart(); paintDock(); pushLayers(); paintLegend(); })); row.onclick = () => { if (S.metrics) { A.rep.sid = S.id; go('report'); } }; row.style.cursor = S.metrics ? 'pointer' : 'default'; });
+}
+$('#addStrat').onclick = () => go('editor');
+
+/* ---------- editor ---------- */
+const ta = $('#code'), hlEl = $('#hl'), gut = $('#gutter');
+const KW = /^(if|else|for|to|by|while|var|varip|and|or|not|true|false|na|switch|break|continue|in)$/, NS = /^(ta|math|strategy|input|color|str|array|timeframe|syminfo|barstate|request|plot|shape|location|size|session|hline|dayofweek)$/;
+function highlight(code) {
+  const re = /(\/\/[^\n]*)|("(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?)|(#[0-9a-fA-F]{6,8}\b|\b\d+\.?\d*(?:[eE][+-]?\d+)?\b)|([A-Za-z_]\w*)/g; let out = '', last = 0, m;
+  while ((m = re.exec(code))) { out += esc(code.slice(last, m.index)); last = re.lastIndex; const t = m[0];
+    if (m[1]) out += `<span class="t-c">${esc(t)}</span>`; else if (m[2]) out += `<span class="t-s">${esc(t)}</span>`; else if (m[3]) out += `<span class="t-n">${esc(t)}</span>`;
+    else if (KW.test(t)) out += `<span class="t-k">${t}</span>`; else if (NS.test(t) && code[last] === '.') out += `<span class="t-ns">${t}</span>`; else if (code[last] === '(') out += `<span class="t-f">${t}</span>`; else out += t; }
+  return out + esc(code.slice(last)) + '\n';
+}
+let errLineNo = 0;
+function paintCode() { const v = ta.value; hlEl.innerHTML = highlight(v); const n = v.split('\n').length; gut.innerHTML = Array.from({ length: n }, (_, i) => (i + 1 === errLineNo ? `<span class="bad">${i + 1}</span>` : i + 1)).join('\n'); syncScroll(); }
+function syncScroll() { hlEl.scrollTop = ta.scrollTop; hlEl.scrollLeft = ta.scrollLeft; gut.scrollTop = ta.scrollTop; const el = $('#errLine'); if (errLineNo) { el.classList.remove('hide'); el.style.top = `calc(12px + ${(errLineNo - 1) * 1.6}em - ${ta.scrollTop}px)`; } else el.classList.add('hide'); }
+function setErr(line) { errLineNo = line || 0; paintCode(); }
+function allErrors(code) { // keep checking: neutralise each faulty line and look again, so every line with a problem is listed
+  const out = [], seen = new Set(), src = code.split('\n');
+  for (let k = 0; k < 40; k++) {
+    const e = Pine.check(src.join('\n')); if (!e) break; let ln = (e.line || 0) - 1;
+    for (let j = ln - 1; j >= 0 && j >= ln - 6; j--) { const L = src[j].replace(/\/\/.*$/, '').replace(/"[^"]*"|'[^']*'/g, ''); if (!L.trim()) continue; const open = (L.match(/[([]/g) || []).length - (L.match(/[)\]]/g) || []).length; if (open > 0 || /([+\-*/%<>=,?:]|\b(and|or|not))\s*$/.test(L)) ln = j; else break; }
+    e.line = ln + 1; const id = e.line + '|' + e.message; if (seen.has(id)) break; seen.add(id); out.push({ line: e.line, message: e.message, text: code.split('\n')[ln] || '' });
+    if (ln < 0 || ln >= src.length || /^\s*(na|if true)\s*$/.test(src[ln])) break;
+    const ind = /^\s*/.exec(src[ln])[0]; let nx = ln + 1; while (nx < src.length && !src[nx].trim()) nx++;
+    src[ln] = ind + (nx < src.length && /^\s*/.exec(src[nx])[0].length > ind.length ? 'if true' : 'na');
+  }
+  return out;
+}
+let lastErrs = [];
+function paintErrors() {
+  const s = cur(), S = A.strats.find(x => x.scriptId === curId), errs = allErrors(ta.value);
+  if (S && S.error && !errs.some(e => e.line === S.error.line && e.message === S.error.message)) errs.push({ line: S.error.line, message: S.error.message, text: ta.value.split('\n')[(S.error.line || 1) - 1] || '', run: true });
+  lastErrs = errs; const badge = $('#ecount'); badge.textContent = errs.length; badge.classList.toggle('hide', !errs.length);
+  const el = $('#p-errors');
+  if (!errs.length) { el.innerHTML = `<p class="note">No errors found in "${esc(s.name)}".</p>`; return; }
+  el.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn small primary" id="copyErrs">Copy errors</button><button class="btn small" id="copyErrsAll">Copy errors + full script</button></div>
+  <p class="note">${errs.length} line${errs.length === 1 ? '' : 's'} with a problem in "${esc(s.name)}". Click one to jump to it. Later errors can be knock-on effects of an earlier one.</p>
+  <div class="err-list">${errs.map((e, i) => `<button class="err-item" data-ei="${i}"><b>Line ${e.line || '?'}${e.run ? ' (while running)' : ''}</b><span>${esc(e.message)}</span>${e.text.trim() ? `<code>${esc(e.text.trim())}</code>` : ''}</button>`).join('')}</div>`;
+  $$('[data-ei]', el).forEach(b => (b.onclick = () => { const e = errs[+b.dataset.ei], lines = ta.value.split('\n'); let pos = 0; for (let i = 0; i < (e.line || 1) - 1 && i < lines.length; i++) pos += lines[i].length + 1; ta.focus(); ta.setSelectionRange(pos, pos + (lines[(e.line || 1) - 1] || '').length); ta.scrollTop = Math.max(0, ((e.line || 1) - 4) * parseFloat(getComputedStyle(ta).lineHeight || 20)); syncScroll(); }));
+  $('#copyErrs').onclick = () => copyErrors(false); $('#copyErrsAll').onclick = () => copyErrors(true);
+}
+function copyErrors(withCode) {
+  const s = cur(); let txt = `TradeX Pine script "${s.name}" has ${lastErrs.length} error${lastErrs.length === 1 ? '' : 's'}:\n` + lastErrs.map((e, i) => `${i + 1}. Line ${e.line || '?'}${e.run ? ' (while running)' : ''}: ${e.message}${e.text.trim() ? '\n   > ' + e.text.trim() : ''}`).join('\n');
+  if (withCode) txt += '\n\nFull script (line numbers added for reference):\n' + ta.value.split('\n').map((l, i) => String(i + 1).padStart(3, ' ') + ' | ' + l).join('\n');
+  const done = () => toast('Copied, paste it into any AI chat'); if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(txt).then(done, () => fallbackCopy(txt, done)); else fallbackCopy(txt, done);
+}
+function fallbackCopy(txt, done) { const t = document.createElement('textarea'); t.value = txt; t.style.position = 'fixed'; t.style.opacity = '0'; document.body.appendChild(t); t.select(); try { document.execCommand('copy'); done(); } catch (e) { toast('Could not copy, select the text manually', true); } t.remove(); }
+function setMsg(text, kind) { const m = $('#edMsg'); m.textContent = text; m.className = 'msg ' + (kind || ''); }
+let checkT;
+ta.addEventListener('input', () => { cur().code = ta.value; cur().updated = Date.now(); cur().dirty = true; paintCode(); clearTimeout(checkT); checkT = setTimeout(() => { saveScripts(); const e = Pine.check(ta.value); if (e) { setErr(e.line); setMsg(`Line ${e.line}: ${e.message}`, 'err'); } else { setErr(0); setMsg('No syntax problems. Press Ctrl+Enter to run.', ''); } paintErrors(); }, 500); });
+ta.addEventListener('scroll', syncScroll);
+ta.addEventListener('keydown', e => {
+  if (e.key === 'Tab') { e.preventDefault(); const s = ta.selectionStart; ta.setRangeText('    ', s, ta.selectionEnd, 'end'); ta.dispatchEvent(new Event('input')); }
+  else if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) { const s = ta.selectionStart, line = ta.value.slice(ta.value.lastIndexOf('\n', s - 1) + 1, s), ind = /^\s*/.exec(line)[0] + (/(=>|\bif\b.*|\belse\b|\bfor\b.*|\bwhile\b.*|\bswitch\b.*)\s*$/.test(line) && !/=>\s*\S/.test(line) ? '    ' : ''); e.preventDefault(); ta.setRangeText('\n' + ind, s, ta.selectionEnd, 'end'); ta.dispatchEvent(new Event('input')); }
+});
+document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && A.view === 'editor') { e.preventDefault(); runCurrent(); } if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && A.view === 'editor') { e.preventDefault(); saveCurrent(); } });
+function syncEditor() { const s = cur(); if (ta.value !== s.code) ta.value = s.code; $('#scriptName').value = s.name; paintCode(); paintLib(); paintInputs(); paintSetup(); paintErrors(); const S = A.strats.find(x => x.scriptId === curId); if (S && (S.result || S.error)) afterRun(S, true); else { $('#quick').classList.add('hide'); $('#openReport').classList.add('hide'); $('#showOnChart').classList.add('hide'); setMsg('Press Ctrl+Enter or Run backtest. The test uses every loaded candle.', ''); setErr(0); } }
+function openScript(id) { curId = id; store.set('cur', id); syncEditor(); }
+function saveCurrent() { const s = cur(); s.code = ta.value; s.name = $('#scriptName').value.trim() || 'Untitled'; s.dirty = false; saveScripts(); paintLib(); toast('Saved'); }
+$('#scriptName').onchange = () => { cur().name = $('#scriptName').value.trim() || 'Untitled'; cur().named = true; saveScripts(); paintLib(); const S = A.strats.find(x => x.scriptId === curId); if (S) { S.name = cur().name; paintDock(); } };
+$('#saveBtn').onclick = saveCurrent; $('#runBtn').onclick = () => runCurrent();
+$('#sideBtn').onclick = () => $('#v-editor').classList.toggle('side');
+$('#openReport').onclick = () => { const S = A.strats.find(x => x.scriptId === curId); if (S) A.rep.sid = S.id; go('report'); };
+$('#showOnChart').onclick = () => go('chart');
+async function runCurrent() {
+  const s = cur(); s.code = ta.value; s.name = $('#scriptName').value.trim() || 'Untitled'; saveScripts();
+  const e = Pine.check(s.code); paintErrors(); if (e) { setErr(e.line); setMsg(`Line ${e.line}: ${e.message}`, 'err'); log(`Line ${e.line}: ${e.message}`, 'e'); return; }
+  if (!A.data[key(A.symbol, A.tf)] || !A.data[key(A.symbol, A.tf)].t.length) { setMsg(`No ${SYMS[A.symbol]} candles are loaded, so there is nothing to test on.`, 'err'); return; }
+  $('#runBtn').disabled = true; setMsg('Running on ' + A.data[key(A.symbol, A.tf)].t.length.toLocaleString('en-IN') + ' candles', ''); setErr(0);
+  const S = addToChart(s.id); S.visible = true; await runStrat(S); $('#runBtn').disabled = false; paintLib();
+}
+function log(text, k) { const c = $('#console'); if (c.dataset.fresh !== '1') { c.innerHTML = ''; c.dataset.fresh = '1'; } const d = document.createElement('div'); d.className = k || ''; d.textContent = new Date().toTimeString().slice(0, 8) + '  ' + text; c.prepend(d); }
+function afterRun(S, silent) {
+  const q = $('#quick'); if (S.scriptId === curId) paintErrors();
+  if (S.error) { setErr(S.error.line); setMsg(`Line ${S.error.line || '?'}: ${S.error.message}`, 'err'); q.classList.add('hide'); $('#openReport').classList.add('hide'); $('#showOnChart').classList.add('hide'); if (!silent) { log(`Line ${S.error.line || '?'}: ${S.error.message}`, 'e'); sidePane('console'); } return; }
+  const r = S.result, M = S.metrics; setErr(0);
+  if (!silent) { log(`${S.name}: ${S.data.t.length.toLocaleString('en-IN')} candles of ${S.symbolName} ${S.tf} min in ${Math.round(r.ms)} ms, ${r.trades.length} trades`, 'o'); r.warnings.forEach(w => log(w, 'w')); }
+  $('#showOnChart').classList.remove('hide'); paintInputs();
+  if (!M) { q.classList.add('hide'); $('#openReport').classList.add('hide'); setMsg(`Indicator drawn with ${r.plots.length} line${r.plots.length === 1 ? '' : 's'}. It places no orders, so there is no report.`, 'ok'); return; }
+  $('#openReport').classList.remove('hide'); q.classList.remove('hide');
+  q.innerHTML = `<div><small>Net profit</small><b class="${cls(M.net)}">${sinr(M.net)}</b></div><div><small>Trades and win rate</small><b>${M.all.n} at ${M.all.winRate.toFixed(1)}%</b></div><div><small>Profit factor</small><b>${f2(M.all.pf)}</b></div><div><small>Max drawdown</small><b class="down">${M.dd.maxPct.toFixed(2)}%</b></div>`;
+  setMsg(`Tested ${S.symbolName} ${S.tf} min from ${dstr(S.data.t[0])} to ${dstr(S.data.t[S.data.t.length - 1])}${r.warnings.length ? '. ' + r.warnings.length + ' note in the console' : ''}`, 'ok');
+}
+function sidePane(p) { $$('#sideTabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.p === p)); $$('.ed-side .pane').forEach(x => x.classList.toggle('on', x.id === 'p-' + p)); }
+$$('#sideTabs button').forEach(b => (b.onclick = () => sidePane(b.dataset.p)));
+function paintLib() {
+  const el = $('#p-lib');
+  el.innerHTML = `<div style="display:flex;gap:6px"><button class="btn small primary" id="newScript">New script</button><button class="btn small" id="dupScript">Duplicate</button><button class="btn small" id="delScript">Delete</button></div>
+  <div class="lib-head">Your scripts</div>${scripts.map(s => `<button class="lib-item" data-id="${s.id}" aria-current="${s.id === curId}"><span class="nm">${esc(s.name)}</span>${A.strats.some(x => x.scriptId === s.id) ? '<small>on chart</small>' : ''}</button>`).join('')}
+  <div class="lib-head">Starters, click to copy into your scripts</div>${TX_SAMPLES.map((s, i) => `<button class="lib-item" data-sample="${i}"><span class="nm">${esc(s.name)}</span><small>copy</small></button>`).join('')}
+  <div class="lib-head">Open a .pine or .txt file</div><input type="file" id="pineFile" accept=".pine,.txt" class="inp">`;
+  $$('[data-id]', el).forEach(b => (b.onclick = () => openScript(b.dataset.id)));
+  $$('[data-sample]', el).forEach(b => (b.onclick = () => { const s = TX_SAMPLES[+b.dataset.sample], n = { id: uid(), name: s.name, code: s.code, updated: Date.now() }; scripts.unshift(n); saveScripts(); openScript(n.id); }));
+  $('#newScript').onclick = () => { const n = { id: uid(), name: 'New strategy', code: '//@version=5\nstrategy("New strategy", overlay=true, initial_capital=500000, default_qty_value=75)\n\n// Write your rules below\nif ta.crossover(close, ta.sma(close, 20))\n    strategy.entry("Long", strategy.long)\nif ta.crossunder(close, ta.sma(close, 20))\n    strategy.close("Long")\n', updated: Date.now() }; scripts.unshift(n); saveScripts(); openScript(n.id); ta.focus(); };
+  $('#dupScript').onclick = () => { const s = cur(), n = { id: uid(), name: s.name + ' copy', code: s.code, updated: Date.now() }; scripts.unshift(n); saveScripts(); openScript(n.id); };
+  $('#delScript').onclick = () => { if (scripts.length < 2) return toast('Keep at least one script', true); if (!confirm(`Delete "${cur().name}"? This cannot be undone.`)) return; A.strats = A.strats.filter(x => x.scriptId !== curId); scripts = scripts.filter(s => s.id !== curId); saveScripts(); saveOnChart(); paintDock(); pushLayers(); openScript(scripts[0].id); };
+  $('#pineFile').onchange = async e => { const f = e.target.files[0]; if (!f) return; const n = { id: uid(), name: f.name.replace(/\.(pine|txt)$/i, ''), code: await f.text(), updated: Date.now() }; scripts.unshift(n); saveScripts(); openScript(n.id); };
+}
+let inpT;
+function paintInputs() {
+  const el = $('#p-inputs'), S = A.strats.find(x => x.scriptId === curId), ins = S && S.result ? S.result.inputs : [];
+  if (!ins.length) { el.innerHTML = '<p class="note">Inputs declared in the script with input.int, input.float and the like show here after a run. Change one and the test runs again.</p>'; return; }
+  el.innerHTML = ins.map((x, i) => { const v = x.value, id = 'in' + i;
+    if (x.type === 'bool') return `<label class="check"><input type="checkbox" data-in="${esc(x.title)}" ${v ? 'checked' : ''}>${esc(x.title)}</label>`;
+    if (x.options && Array.isArray(x.options)) return `<label class="field">${esc(x.title)}<select data-in="${esc(x.title)}">${x.options.map(o => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></label>`;
+    if (x.type === 'source') return `<label class="field">${esc(x.title)}<select data-in="${esc(x.title)}">${['open', 'high', 'low', 'close', 'hl2', 'hlc3', 'ohlc4', 'hlcc4'].map(o => `<option ${o === v ? 'selected' : ''}>${o}</option>`).join('')}</select></label>`;
+    const numeric = x.type === 'int' || x.type === 'float'; return `<label class="field" for="${id}">${esc(x.title)}<input id="${id}" data-in="${esc(x.title)}" type="${numeric ? 'number' : 'text'}" value="${esc(v)}" ${numeric ? `step="${x.step || (x.type === 'int' ? 1 : 'any')}" ${x.minval != null ? `min="${x.minval}"` : ''} ${x.maxval != null ? `max="${x.maxval}"` : ''}` : ''}></label>`; }).join('') + '<button class="btn small" id="resetIn">Back to script defaults</button>';
+  $$('[data-in]', el).forEach(i => (i.oninput = i.onchange = () => { S.inputs = S.inputs || {}; S.inputs[i.dataset.in] = i.type === 'checkbox' ? i.checked : i.value; saveOnChart(); clearTimeout(inpT); inpT = setTimeout(() => runStrat(S), 350); }));
+  $('#resetIn').onclick = () => { S.inputs = {}; saveOnChart(); runStrat(S); };
+}
+function paintSetup() {
+  const el = $('#p-setup'), f = (k, label, ph, type) => `<label class="field">${label}<input data-set="${k}" type="${type || 'number'}" value="${esc(settings[k])}" placeholder="${ph || ''}" ${type ? '' : 'min="0" step="any"'}></label>`;
+  el.innerHTML = `<p class="note">These apply to every strategy. Leave a box empty to use what the script itself says.</p><div class="grid2">${f('capital', 'Starting capital (₹)', 'From script')}${f('qty', 'Quantity per order', 'From script')}${f('commission', 'Charges per order (₹)', 'From script')}${f('slippage', 'Slippage (points)', 'From script')}${f('from', 'Test from', '', 'date')}${f('to', 'Test up to', '', 'date')}</div>
+  <label class="check"><input type="checkbox" data-set="pooc" ${settings.pooc ? 'checked' : ''}>Fill orders at the signal candle's close</label><p class="note">Normally an order fills at the next candle's open, the same as TradingView. NIFTY lot is 75 and BANK NIFTY 35 in the starters; set your own quantity if the exchange lot has changed.</p><button class="btn small primary" id="applySetup">Apply and run again</button>`;
+  $$('[data-set]', el).forEach(i => (i.onchange = () => { settings[i.dataset.set] = i.type === 'checkbox' ? i.checked : i.value; store.set('settings', settings); }));
+  $('#applySetup').onclick = () => { runAll(false); toast('Test setup applied'); };
+}
+
+/* ---------- data tab ---------- */
+async function renderData() {
+  const el = $('#v-data'), syms = Object.keys(SYMS);
+  el.innerHTML = `<div class="rep-head"><h2>Data</h2><span class="muted">What is loaded and where it comes from</span><span class="spacer"></span><button class="btn small" id="refData">Refresh</button></div><div class="scroll" style="flex:1"><div class="rep-body"><div class="data-cards">${syms.map(s => { const st = A.status[s] || {}; return `<div class="panel"><header><h3>${SYMS[s]}</h3><p>${st.candles ? 'Loaded' : 'No candles yet'}</p></header><dl class="kv"><dt>5 minute candles</dt><dd>${(st.candles || 0).toLocaleString('en-IN')}</dd><dt>Trading days</dt><dd>${st.days || 0}</dd><dt>First candle</dt><dd>${st.first ? dtstr(st.first) : '–'}</dd><dt>Last candle</dt><dd>${st.last ? dtstr(st.last) : '–'}</dd><dt>Last price</dt><dd>${st.price != null ? f2(st.price) : '–'}${st.priceAt ? ' at ' + dtstr(st.priceAt) : ''}</dd><dt>Live price source</dt><dd>${esc(st.source || 'Not connected yet')}</dd>${st.error ? `<dt>Last problem</dt><dd class="down">${esc(st.error)}</dd>` : ''}</dl><div class="cover" id="cov-${s}" title="Trading days loaded in each month"></div><p class="note" id="covn-${s}" style="margin-top:6px"></p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><button class="btn small" data-dl="${s}">Download ${A.tf} min candles as CSV</button><label class="btn small">Import CSV<input type="file" accept=".csv,.txt" data-imp="${s}" hidden></label></div></div>`; }).join('')}</div>
+  <div class="panel"><header><h3>How the data works</h3></header><p class="note" style="line-height:1.7">History is kept as 5 minute candles. The 15 and 30 minute candles are built from them, so all three always agree.<br>The live price comes from Yahoo Finance and is checked every 2 seconds during market hours (9:15 to 15:30, Monday to Friday). It is a free source and can lag the exchange by a few seconds.<br>CSV import accepts files with date, time, open, high, low and close columns (1, 3 or 5 minute candles, exchange time). Existing candles are kept, only missing ones are added.</p></div></div></div>`;
+  $('#refData').onclick = refreshStatus;
+  $$('[data-dl]', el).forEach(b => (b.onclick = async () => { const d = await loadData(b.dataset.dl, A.tf); const rows = ['datetime,open,high,low,close']; for (let i = 0; i < d.t.length; i++) rows.push(`${new Date((d.t[i] + IST) * 1000).toISOString().slice(0, 16).replace('T', ' ')},${d.o[i]},${d.h[i]},${d.l[i]},${d.c[i]}`); download(`${b.dataset.dl}_${A.tf}min.csv`, rows.join('\n')); }));
+  $$('[data-imp]', el).forEach(inp => (inp.onchange = async () => { const f = inp.files[0]; if (!f) return; toast('Importing ' + f.name); try { const r = await fetch(`${API}/api/import?symbol=${inp.dataset.imp}`, { method: 'POST', body: await f.text() }), j = await r.json(); if (!r.ok) throw new Error(j.error); toast(`${j.added.toLocaleString('en-IN')} new candles added from ${j.rows.toLocaleString('en-IN')} rows`); for (const tf of [5, 15, 30]) delete A.data[key(inp.dataset.imp, tf)]; await refreshStatus(); if (inp.dataset.imp === A.symbol) switchData(); } catch (e) { toast('Import failed: ' + e.message, true); } }));
+  for (const s of syms) { try { const d = await loadData(s, 30), months = {}; for (const t of d.t) { const x = new Date((t + IST) * 1000), k = x.getUTCFullYear() * 12 + x.getUTCMonth(); (months[k] || (months[k] = new Set())).add(x.getUTCDate()); }
+      const ks = Object.keys(months).map(Number); if (!ks.length) { $('#covn-' + s).textContent = 'Nothing loaded yet.'; continue; } const a = Math.min(...ks), b = Math.max(...ks); let h = '', low = 0; for (let k = a; k <= b; k++) { const n = months[k] ? months[k].size : 0; if (n < 15 && k !== b && k !== a) low++; h += `<i class="${n < 15 && k !== b && k !== a ? 'low' : ''}" style="height:${Math.max(4, n / 23 * 100)}%" title="${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][k % 12]} ${Math.floor(k / 12)}: ${n} days"></i>`; }
+      const c = $('#cov-' + s); if (c) { c.innerHTML = h; $('#covn-' + s).textContent = `Each bar is a month, height is the number of trading days loaded.${low ? ` ${low} month${low > 1 ? 's look' : ' looks'} incomplete (red).` : ''}`; } } catch (e) { /* card already shows the status */ } }
+}
+
+/* ---------- settings tab ---------- */
+function renderSettings() {
+  const el = $('#v-settings');
+  el.innerHTML = `<div class="rep-head"><h2>Settings</h2></div><div class="scroll" style="flex:1"><div class="rep-body"><div class="cols">
+  <div class="panel"><header><h3>Look</h3></header><div class="chips"><button class="chip" data-th="dark" aria-pressed="${settings.theme === 'dark'}">Dark</button><button class="chip" data-th="light" aria-pressed="${settings.theme === 'light'}">Light</button></div></div>
+  <div class="panel"><header><h3>Keyboard</h3></header><dl class="kv"><dt>Run the backtest</dt><dd><kbd>Ctrl</kbd> <kbd>Enter</kbd></dd><dt>Save the script</dt><dd><kbd>Ctrl</kbd> <kbd>S</kbd></dd><dt>Move the chart</dt><dd><kbd>←</kbd> <kbd>→</kbd> or drag</dd><dt>Zoom</dt><dd>Mouse wheel, <kbd>+</kbd> <kbd>−</kbd></dd><dt>Latest candles</dt><dd><kbd>End</kbd> or double click</dd><dt>Whole history</dt><dd><kbd>Home</kbd></dd></dl></div>
+  <div class="panel"><header><h3>Pine support</h3><p>${Pine.functions.length} built-in functions</p></header><p class="note" style="line-height:1.7">Works: strategy and indicator scripts in v5 or v6 style, inputs, var, if, for, while, switch, your own functions, arrays, history like close[1], the common ta.* and math.* functions, strategy.entry, exit (stop, target, trailing), close, close_all, plot, plotshape, hline and bgcolor.<br>Not available: request.security, libraries, tables, labels and boxes (drawings are skipped, the logic still runs), matrices and maps. The editor names the line when a script uses something missing.</p></div>
+  <div class="panel"><header><h3>Workspace</h3></header><dl class="kv"><dt>Server address</dt><dd>${esc(API || location.origin)}</dd><dt>Scripts saved in this browser</dt><dd>${scripts.length}</dd></dl><p style="margin:12px 0 0;display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" id="expAll">Back up all scripts</button><button class="btn small" id="resetAll">Clear this browser's TradeX data</button></p><p class="note" style="margin-top:8px">Scripts and settings live in this browser only. Back them up before clearing browser data or moving to another computer.</p></div></div></div></div>`;
+  $$('[data-th]', el).forEach(b => (b.onclick = () => { settings.theme = b.dataset.th; applyTheme(); }));
+  $('#expAll').onclick = () => download('TradeX scripts backup.json', JSON.stringify(scripts, null, 1));
+  $('#resetAll').onclick = () => { if (confirm('Delete all scripts and settings saved in this browser? This cannot be undone.')) { Object.keys(localStorage).filter(k => k.startsWith('tx.')).forEach(k => localStorage.removeItem(k)); location.reload(); } };
+}
+
+/* ---------- start ---------- */
+for (const o of store.get('onchart', [])) if (scripts.find(s => s.id === o.scriptId)) A.strats.push({ id: uid(), scriptId: o.scriptId, color: o.color, visible: o.visible !== false, inputs: o.inputs || {}, name: scripts.find(s => s.id === o.scriptId).name });
+if (innerWidth < 900) $('#dock').classList.add('closed');
+paintSyms(); paintDock(); pushLayers(); go(location.hash.slice(1) || 'chart'); requestAnimationFrame(paintTf); if (document.fonts && document.fonts.ready) document.fonts.ready.then(paintTf);
+refreshStatus().then(() => switchData()); connect(); setInterval(paintFeed, 1000); setInterval(refreshStatus, 30000);
+window.TX = { A, chart };
+})();

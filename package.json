@@ -1,0 +1,8 @@
+{
+  "name": "tradex",
+  "version": "1.0.0",
+  "description": "TradeX: strategy backtesting for NIFTY 50 and BANK NIFTY",
+  "private": true,
+  "scripts": { "start": "node server/index.js" },
+  "engines": { "node": ">=18" }
+}

@@ -1,0 +1,238 @@
+TradeX - PLAN
+=============
+Backtesting website for NIFTY 50 and BANK NIFTY
+Status: BUILT. See UPDATE 2 just below for what is done, what was checked and what is still open.
+Last updated: 10 Nov 2026
+
+
+UPDATE 2 - 10 Nov 2026, 9:30 pm - BUILD FINISHED
+------------------------------------------------
+What is in C:\Test now:
+  Start TradeX.bat   double-click to run the site on this computer (http://localhost:8080)
+  server\index.js    data server: history, 15/30 min candles, live price
+  web\               landing page (index.html), workspace (app.html), styles and scripts
+  data\              created on first start, holds the downloaded candles
+  DEPLOY.txt         GitHub, Render and Cloudflare steps
+  README.md, package.json, render.yaml, .gitignore   needed for GitHub and Render
+  PLAN.txt           this file
+
+Workspace tabs: Chart, Editor, Report, Trades, Compare, Data, Settings.
+Report tabs: Overview, Performance, Trade analysis, Calendar, Risk.
+Pine engine: 151 built-in functions. Five starter strategies are in the editor library.
+
+What I checked, and how:
+  - Indicators (EMA, SMA, RSI, MACD, ATR, highest, history like close[3]) against separate
+    reference calculations on 16,125 candles: match to 10 decimal places or better.
+  - EMA crossover backtest against a separately written simulation: all 725 trades identical
+    (entry candle, exit candle, prices, net profit).
+  - Stop loss, target, trailing stop, stop-entry, pyramiding, partial close, charges and slippage
+    against hand-worked cases: all correct.
+  - Server against a stand-in data source: history download, the junk after-hours candle dropped,
+    a missing week filled from the second source, 15 and 30 min candles exactly 25 and 13 per day,
+    live ticks pushed to the browser and the last candle moving on the chart.
+  - Every tab opened and clicked through in a test browser at laptop and phone size,
+    dark and light: no errors in the browser console.
+
+What I could NOT check, be aware:
+  - All of the above ran on TEST data on my side, because my work area has no internet.
+    The first run on your computer is the first run on the real NIFTY data and real Yahoo feed.
+  - Live updating in real market hours. 10 Nov 2026 is a holiday. Watch it on the next trading day:
+    the pill at top right should say "Live" and the last candle should move every 2 seconds or so.
+  - Hosting on Render and Cloudflare. The files are ready, but I have not deployed them.
+    Yahoo may refuse requests from Render's servers; if so the Data tab will say so.
+
+Still open:
+  - BANK NIFTY history before about 13 Aug 2026 (no source). Import a CSV on the Data tab if you get one.
+  - Pine: request.security, libraries, tables, labels/boxes, matrices and maps are not supported.
+  - Node.js must stay installed for the localhost site to run. I have not installed or removed any tool.
+  - No password gate was added (it was planned for broker data, which is no longer used).
+    If you host it publicly, set ADMIN_KEY on Render so strangers cannot import data.
+
+UPDATE 1 - 10 Nov 2026, 8:30 pm - DATA SOURCE SETTLED, BUILD STARTED
+--------------------------------------------------------------------
+You have no broker account, so section 2 below is replaced by this.
+
+What I found on your site tradex-terminal-de4w.onrender.com:
+  - NIFTY 50, 5 min : 52,560 candles, 1 Jan 2024 to 9 Nov 2026. 700 full days of 75 candles. Clean.
+  - NIFTY 50, 15 min: 17,524 candles, same period. Clean.
+  - One hole in it: 27 Oct 2026 to 2 Nov 2026 is missing.
+  - BANK NIFTY: NO history stored there at all. Only the last few candles.
+  - 30 min: not stored (not a problem, I build it from the 5 min candles).
+
+How TradeX will get its data now:
+  - NIFTY history    : downloaded once from your site into the data folder, then kept in the project.
+  - Last 60 days     : taken from Yahoo Finance for both indexes. This fills the Oct-Nov hole.
+  - BANK NIFTY       : Yahoo gives only the last 60 days of 5 min candles (from 13 Aug 2026).
+                       Older BANK NIFTY history is NOT available from any source I have.
+                       TradeX keeps adding every new day, and the Data tab has a CSV import
+                       so older BANK NIFTY candles can be loaded if you get a file.
+  - Live price       : Yahoo Finance, checked every 2 seconds in market hours.
+                       This is near real time (a few seconds), not broker tick-by-tick.
+                       Yahoo is an unofficial free source. It can change or block without notice,
+                       and may block Render's servers. A broker API remains the only firm option.
+  - 15 and 30 min    : always built from the 5 min candles, so the three never disagree.
+  - No daily login is needed now.
+
+Other changes to the plan:
+  - Server uses plain Node.js with no extra packages, so nothing else needs installing.
+  - Chart is my own canvas chart (no outside chart library).
+  - "Results by expiry day" dropped from the report: expiry days changed several times in
+    2024-2026 and I cannot verify the dates. Day-of-week and time-of-day results stay.
+  - 10 Nov 2026 is a market holiday, so live updating can be fully checked only on the next trading day.
+
+
+2. DECISIONS (OLD - REPLACED BY UPDATE 1 ABOVE)
+-----------------------------------------------
+(a) Data source - this is the important one.
+    Real-time, no-delay NSE index data is not available from any free public website.
+    Free sources (Yahoo etc.) are delayed and give only about 60 days of 5 min candles.
+    The only proper way is a broker API, using your own broker account.
+    Options:
+      - Upstox API    : minute candles available from Jan 2022, live websocket feed. Needs an Upstox account.
+      - Zerodha Kite  : Kite Connect is a paid monthly subscription (reported as Rs 500/month,
+                        please confirm on their site). Historical + live data included.
+      - Angel One SmartAPI / Dhan / Fyers : also possible. I will check their limits if you pick one.
+    Tell me which broker you have an account with. I will build for that one.
+
+(b) Daily login.
+    Broker access tokens expire every day (SEBI rule). So "updates on its own" needs one of:
+      - you log in once each morning from a button on the site (about 10 seconds), or
+      - automatic login using your TOTP secret stored on the server (only some brokers allow this).
+    I will build the morning button by default and add auto login if your broker supports it.
+
+(c) Node.js on your computer.
+    The localhost link needs Node.js installed on your PC. If it is not there,
+    it is a one-time free install from nodejs.org. I will check this when I start building.
+
+
+3. HOW IT WILL BE BUILT
+-----------------------
+Two parts, because the broker API key must stay secret and cannot sit in browser code.
+
+Server (Node.js) - hosted on Render
+  - Downloads 5 min candles from 1 Jan 2024 from the broker, month by month, and saves them.
+  - Builds the 15 min and 30 min candles from the 5 min ones, so all three always agree.
+  - Connects to the broker live feed, forms the running candle and pushes it to the browser.
+  - Fills any gap on its own after a restart or a network drop.
+  - Holds the API key and token. They never go to the browser or to GitHub.
+
+Website (plain HTML, CSS, JavaScript) - hosted on Cloudflare Pages
+  - Landing page, chart workspace, Pine editor, strategy tester, reports.
+  - The backtest runs in your browser in a background worker, so the page does not freeze.
+  - Charts drawn with Lightweight Charts, the open-source chart library (free licence).
+
+Code goes to one GitHub repository. Cloudflare and Render both deploy from it.
+A DEPLOY.txt will give the exact steps.
+
+
+4. FOLDER LAYOUT IN C:\Test (only what is required)
+---------------------------------------------------
+C:\Test\
+  PLAN.txt            this file, updated at each stage
+  DEPLOY.txt          GitHub + Cloudflare + Render steps
+  README.md           short description for GitHub
+  .gitignore          keeps keys and data cache out of GitHub
+  .env.example        where the broker key goes (the real .env is never uploaded)
+  package.json        server dependencies
+  render.yaml         Render settings
+  server\             data download, live feed, API
+  web\                landing page, app, styles, scripts, Pine engine
+  data\               saved candles (created automatically, not uploaded)
+No test files, drafts or backups will be left in the folder.
+
+
+5. PAGES AND TABS
+-----------------
+Landing page - minimal, with a live animated candle background that reacts to the mouse,
+               live NIFTY and BANK NIFTY numbers, and one button into the workspace.
+
+Workspace tabs:
+  Chart      - candles, symbol and timeframe switch, crosshair, zoom, date jump,
+               indicators, drawing of trades on the chart, several strategies together.
+  Editor     - Pine code editor with colouring, error messages with line numbers,
+               save / load / duplicate scripts, ready sample strategies.
+  Tester     - run one or many strategies on the full history, settings for capital,
+               quantity or lot size, brokerage, slippage, date range, session time.
+  Report     - see section 7.
+  Compare    - strategies side by side on the same period.
+  Trades     - full trade list, filter, sort, click a trade to jump to it on the chart, export to Excel/CSV.
+  Data       - what data is loaded, last candle time, feed status, gaps if any, download candles as CSV.
+  Settings   - broker login, theme, defaults.
+
+
+6. PINE SUPPORT - PLEASE READ
+-----------------------------
+Pine Script belongs to TradingView and its engine is not public. So TradeX will have its own
+engine that reads Pine v5 / v6 style code. It will cover what strategies normally use:
+  - strategy(), indicator(), input.*, variables, var, if / else, for, while, functions, arrays (basic)
+  - series history like close[1], na handling, math.*
+  - ta.* : sma, ema, rma, wma, vwma, rsi, macd, atr, bollinger, stochastic, supertrend, vwap,
+           highest, lowest, crossover, crossunder, change, pivots and more
+  - strategy.entry, strategy.exit (stop, limit, trailing), strategy.close, strategy.close_all,
+    position size, pyramiding, commission, slippage
+  - time, hour, minute, session checks (useful for intraday square-off)
+  - plot, plotshape, hline, bgcolor, fill (drawn on the chart)
+Not covered in the first version: request.security (other symbols / timeframes), tables, labels and
+boxes with full styling, libraries, matrix and map types. If a script uses something unsupported,
+the editor will say exactly which line and which function. It will not silently give a wrong result.
+Most TradingView strategies will paste and run. I cannot promise every script will.
+
+
+7. STRATEGY REPORT (more detail than TradingView)
+-------------------------------------------------
+  - Net profit, gross profit / loss, profit factor, win rate, expectancy, average win / loss, payoff ratio
+  - Max drawdown (amount, %, duration, recovery time), equity curve with drawdown shading
+  - Sharpe, Sortino, Calmar, CAGR
+  - Long and short shown separately
+  - Month-by-month and year-by-year profit grid
+  - Results by day of week, by time of day and by expiry day
+  - Winning and losing streaks, trade duration spread, profit distribution chart
+  - Best and worst trade and day, run-up and drawdown inside each trade (MAE / MFE)
+  - Buy-and-hold comparison for the same period
+  - Monte Carlo reshuffle of trades to show how much of the result is luck
+All charts in the report are interactive (hover, zoom, click to jump to the chart).
+
+
+8. DESIGN DIRECTION
+-------------------
+Dark first, with a light theme switch. One accent colour, not a rainbow.
+Dense, sharp, terminal-like data panels with clear type, and smooth but quick animation
+(panels slide, numbers roll, charts draw in). No stock gradients, no generic template look.
+
+
+9. ORDER OF WORK
+----------------
+  Stage 1  Server: history download, saving, 15/30 min building, live feed.        -> PLAN updated
+  Stage 2  Chart workspace with history and live candle.                          -> PLAN updated
+  Stage 3  Pine engine and editor.                                                -> PLAN updated
+  Stage 4  Backtest engine, report, compare, trades.                              -> PLAN updated
+  Stage 5  Landing page, animation, polish.                                       -> PLAN updated
+  Stage 6  Full check (section 10), DEPLOY.txt, localhost link handed to you.     -> PLAN updated
+
+
+10. CHECKS BEFORE I CALL IT DONE
+--------------------------------
+  - Candle counts per day (75 / 25 / 13) and OHLC matched against the broker for sample days.
+  - 15 and 30 min candles matched against the 5 min ones.
+  - Live feed watched during market hours: tick arrives, candle closes at the right minute,
+    reconnects after a drop, no duplicate or missing candle.
+  - Indicators (EMA, RSI, ATR, Supertrend etc.) matched against known values.
+  - Backtest of 3 standard strategies matched trade by trade against a hand-worked sheet.
+  - Every tab and button clicked through, in Chrome and Edge, laptop and phone width.
+  - Browser console clean of errors.
+
+
+11. THINGS YOU SHOULD KNOW UPFRONT
+----------------------------------
+  - Live data and full history cannot be tested until your broker API key is in place.
+    Until then the site will run on clearly marked SAMPLE data, only so the screens can be checked.
+  - The live-feed check has to be done in market hours (Mon to Fri, 9:15 to 15:30).
+  - "No delay" means broker tick speed, normally well under a second. It depends on your internet and the broker.
+  - Render's free plan sleeps when idle and wakes slowly. For an always-on live feed the paid
+    starter plan is the practical choice. Cloudflare Pages is free.
+  - Index backtests give points. Real trading is through futures or options, so actual profit
+    will differ. The tester will let you set lot size, brokerage and slippage to get closer.
+  - Broker data terms normally allow personal use only. Keep the site private (login protected),
+    not open to the public. I will add a simple password gate.
+  - I will test thoroughly, but I cannot promise zero bugs in a system this size on day one.
+    Anything found will be fixed.

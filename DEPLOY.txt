@@ -1,0 +1,54 @@
+TradeX - HOW TO HOST IT
+=======================
+
+A. RUN ON YOUR OWN COMPUTER
+---------------------------
+1. Install Node.js (version 18 or newer) from https://nodejs.org  - one time only.
+2. Double-click "Start TradeX.bat" in this folder.
+3. The site opens at http://localhost:8080
+   Keep the black window open while you use the site. Close it to stop.
+
+
+B. PUT THE CODE ON GITHUB
+-------------------------
+1. Create a free account on github.com and a new PRIVATE repository named tradex.
+2. Install GitHub Desktop (desktop.github.com), sign in.
+3. File > Add local repository > choose this folder (C:\Test) > "create a repository" > Publish.
+The data folder goes up too. That is intended: it lets the hosted site start with the full history.
+
+
+C. HOST ON RENDER (simplest - one service does everything)
+----------------------------------------------------------
+1. render.com > New > Blueprint > connect the tradex repository. Render reads render.yaml and sets it up.
+   (Or New > Web Service: Runtime Node, Build command: echo done, Start command: node server/index.js)
+2. After a minute the site is live at https://<name>.onrender.com
+
+Things to know about Render:
+- Free plan sleeps after 15 minutes without visitors and takes about a minute to wake.
+  While asleep it does not collect live candles. On waking it fills the gap from Yahoo (up to 60 days back).
+  For an always-on live feed use the paid Starter plan.
+- Free plan does not keep files between restarts. It starts from the data folder in GitHub each time,
+  then tops up the last 60 days from Yahoo. So push the data folder from your computer to GitHub
+  about once a month (run TradeX locally for a minute first, then Commit + Push in GitHub Desktop).
+- Yahoo Finance sometimes refuses requests from hosting companies. If the Data tab on the hosted site
+  shows "Last problem: Yahoo ...", the live price will not work there, while it still works on your computer.
+
+
+D. CLOUDFLARE PAGES (optional - faster website, Render still needed for data)
+-----------------------------------------------------------------------------
+1. Open web\js\config.js and put your Render address in it:
+      window.TX_API = 'https://<name>.onrender.com';
+   Commit and push.
+2. Cloudflare dashboard > Workers & Pages > Create > Pages > connect the tradex repository.
+   Framework preset: None.  Build command: (leave empty).  Build output directory: web
+3. The website is then served by Cloudflare and asks Render for candles and live prices.
+To go back to Render-only, set window.TX_API = ''; again.
+
+
+E. SETTINGS (optional, set as Environment variables on Render)
+--------------------------------------------------------------
+PORT          address port. Render sets this itself. Default 8080 on your computer.
+POLL_MS       how often the live price is checked in market hours. Default 2000 (2 seconds). Minimum 1000.
+ADMIN_KEY     if set, CSV import on the Data tab is refused unless this key is sent. Use it on a public site.
+SEED_URL      where the first NIFTY history download comes from. Default is your tradex-terminal site.
+ALLOW_ORIGIN  which website may read the data. Default * (any). Set to your Cloudflare address to restrict.
