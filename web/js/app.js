@@ -216,6 +216,14 @@ async function deployScriptToCloud(id, name, code, inputs) {
   }
 }
 
+function closeAllStratMenus() {
+  $$('.strat-dropdown').forEach(m => m.classList.add('hide'));
+  $$('.strat').forEach(s => s.classList.remove('menu-open'));
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('.strat-menu')) closeAllStratMenus();
+});
+
 function paintDock() {
   const el = $('#stratList');
   if (!A.strats.length) {
@@ -226,21 +234,59 @@ function paintDock() {
       return `<div class="strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''}" data-id="${S.id}">
         <i class="dot" style="background:${S.color}"></i>
         <span class="nm" title="${esc(S.name || '')}">${esc(S.name || 'Strategy')}</span>
-        <span class="acts">
-          <button data-a="cloud" title="Deploy to Cloud (runs 24/7 with PC off)" aria-label="Deploy to Cloud">Cloud</button>
-          <button data-a="eye" title="${S.visible ? 'Hide' : 'Show'} on chart" aria-label="Show or hide">${S.visible ? 'Hide' : 'Show'}</button>
-          <button data-a="edit" title="Open in editor" aria-label="Edit">Edit</button>
-          <button data-a="del" title="Remove from chart" aria-label="Remove">Remove</button>
-        </span>
+        <div class="strat-menu">
+          <button class="strat-menu-btn" data-m="btn" title="Options" aria-label="Strategy options">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
+          </button>
+          <div class="strat-dropdown hide">
+            <button data-a="cloud">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+              Deploy to Cloud
+            </button>
+            <button data-a="eye">
+              ${S.visible
+                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20M9.88 9.88a3 3 0 1 0 4.24 4.24M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/></svg>Hide on Chart`
+                : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>Show on Chart`
+              }
+            </button>
+            <button data-a="edit">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+              Edit Script
+            </button>
+            <div class="menu-sep"></div>
+            <button data-a="del" class="menu-danger">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+              Remove from Chart
+            </button>
+          </div>
+        </div>
         <span class="sub">
           ${S.error ? `<span class="down">Line ${S.error.line || '?'}: ${esc(S.error.message)}</span>` : M ? `<span class="${cls(M.all.pts)}" style="font-weight:800">${M.all.pts >= 0 ? '+' : '−'}${Math.abs(M.all.pts).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts</span><span>${M.all.n} trades</span><span>${M.all.winRate.toFixed(0)}% won</span><span>DD ${M.dd.maxPct.toFixed(1)}%</span><span class="${cls(M.net)}" style="opacity:.75">${sinr(M.net)}</span>` : S.result ? '<span>Indicator, no trades</span>' : '<span>Waiting</span>'}
         </span>
       </div>`;
     }).join('');
+
     $$('.strat', el).forEach(row => {
       const S = A.strats.find(s => s.id === row.dataset.id);
-      $$('button', row).forEach(b => (b.onclick = async ev => {
+      const mBtn = row.querySelector('[data-m="btn"]');
+      const mDrop = row.querySelector('.strat-dropdown');
+      if (mBtn && mDrop) {
+        mBtn.onclick = ev => {
+          ev.stopPropagation();
+          const wasHidden = mDrop.classList.contains('hide');
+          closeAllStratMenus();
+          if (wasHidden) {
+            const r = mBtn.getBoundingClientRect();
+            if (window.innerHeight - r.bottom < 190) mDrop.classList.add('drop-up');
+            else mDrop.classList.remove('drop-up');
+            mDrop.classList.remove('hide');
+            row.classList.add('menu-open');
+          }
+        };
+      }
+      $$('.strat-dropdown button', row).forEach(b => (b.onclick = async ev => {
         ev.stopPropagation();
+        closeAllStratMenus();
         const a = b.dataset.a;
         if (a === 'cloud') {
           const sc = scripts.find(x => x.id === S.scriptId);
@@ -250,7 +296,7 @@ function paintDock() {
         }
         if (a === 'eye') { S.visible = !S.visible; }
         else if (a === 'del') { A.strats = A.strats.filter(x => x !== S); }
-        else { openScript(S.scriptId); go('editor'); return; }
+        else if (a === 'edit') { openScript(S.scriptId); go('editor'); return; }
         saveOnChart(); paintDock(); pushLayers(); paintLegend();
       }));
       row.onclick = () => { if (S.metrics) { A.rep.sid = S.id; go('report'); } };
@@ -283,10 +329,28 @@ function paintCloudList() {
     return `<div class="strat ${cs.enabled ? '' : 'off'}" data-cid="${cs.id}">
       <i class="dot" style="background:${cs.enabled ? 'var(--up)' : 'var(--muted)'}"></i>
       <span class="nm" title="${esc(cs.name)}">${esc(cs.name)}</span>
-      <span class="acts">
-        <button data-ca="toggle" title="${cs.enabled ? 'Pause' : 'Activate'}">${cs.enabled ? 'Pause' : 'Start'}</button>
-        <button data-ca="del" title="Delete from Cloud" class="down">Delete</button>
-      </span>
+      <div class="strat-menu">
+        <button class="strat-menu-btn" data-m="btn" title="Options" aria-label="Cloud strategy options">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
+        </button>
+        <div class="strat-dropdown hide">
+          <button data-ca="toggle">
+            ${cs.enabled
+              ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>Pause 24/7 Run`
+              : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Activate 24/7 Run`
+            }
+          </button>
+          <button data-ca="edit">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+            Edit Script
+          </button>
+          <div class="menu-sep"></div>
+          <button data-ca="del" class="menu-danger">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+            Delete from Cloud
+          </button>
+        </div>
+      </div>
       <span class="sub">
         <span style="font-weight:600">${esc(cs.symbol || 'NIFTY')} · ${cs.tf || 15}m</span>
         <span style="color:${cs.enabled ? 'var(--up)' : 'var(--muted)'}">${cs.enabled ? 'Active 24/7' : 'Paused'}</span>
@@ -299,8 +363,25 @@ function paintCloudList() {
     const cid = row.dataset.cid;
     const cs = cloudStrats.find(x => x.id === cid);
     if (!cs) return;
-    $$('button', row).forEach(b => (b.onclick = async ev => {
+    const mBtn = row.querySelector('[data-m="btn"]');
+    const mDrop = row.querySelector('.strat-dropdown');
+    if (mBtn && mDrop) {
+      mBtn.onclick = ev => {
+        ev.stopPropagation();
+        const wasHidden = mDrop.classList.contains('hide');
+        closeAllStratMenus();
+        if (wasHidden) {
+          const r = mBtn.getBoundingClientRect();
+          if (window.innerHeight - r.bottom < 190) mDrop.classList.add('drop-up');
+          else mDrop.classList.remove('drop-up');
+          mDrop.classList.remove('hide');
+          row.classList.add('menu-open');
+        }
+      };
+    }
+    $$('.strat-dropdown button', row).forEach(b => (b.onclick = async ev => {
       ev.stopPropagation();
+      closeAllStratMenus();
       const ca = b.dataset.ca;
       if (ca === 'toggle') {
         try {
@@ -316,6 +397,19 @@ function paintCloudList() {
             toast(cs.enabled ? `"${cs.name}" resumed on Cloud.` : `"${cs.name}" paused on Cloud.`);
           }
         } catch (e) { toast('Toggle failed', true); }
+      } else if (ca === 'edit') {
+        let sc = scripts.find(x => x.id === cs.id || x.name === cs.name);
+        if (!sc && cs.code) {
+          sc = { id: cs.id || uid(), name: cs.name, code: cs.code, updated: Date.now() };
+          scripts.unshift(sc);
+          saveScripts();
+        }
+        if (sc) {
+          openScript(sc.id);
+          go('editor');
+        } else {
+          toast('Could not find script', true);
+        }
       } else if (ca === 'del') {
         if (!confirm(`Delete "${cs.name}" from Cloud? It will stop sending alerts when PC is off.`)) return;
         try {

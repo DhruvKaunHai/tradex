@@ -93,8 +93,21 @@ h1, h2, h3 { font-family: var(--display); font-weight: 600; margin: 0; letter-sp
 .dock.closed { margin-right: -292px; }
 .dock header { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); } .dock header h2 { font-size: 15px; }
 .dock .list { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
-.strat { border: 1px solid var(--line); border-radius: var(--r2); padding: 10px; display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; background: var(--raise); animation: viewIn .25s; }
+.strat { border: 1px solid var(--line); border-radius: var(--r2); padding: 10px; display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; background: var(--raise); animation: viewIn .25s; position: relative; }
+.strat.menu-open { z-index: 60; }
 .strat .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .strat .sub { grid-column: 2 / 4; font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
+.strat-menu { position: relative; display: flex; align-items: center; }
+.strat-menu-btn { width: 26px; height: 26px; border-radius: 6px; color: var(--muted); display: grid; place-items: center; transition: background .15s, color .15s; cursor: pointer; border: 0; background: none; }
+.strat-menu-btn:hover, .strat.menu-open .strat-menu-btn { background: var(--bg); color: var(--text); }
+.strat-dropdown { position: absolute; top: calc(100% + 4px); right: 0; min-width: 165px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r2); padding: 4px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); z-index: 100; display: flex; flex-direction: column; gap: 2px; }
+.strat-dropdown.drop-up { top: auto; bottom: calc(100% + 4px); }
+.strat-dropdown button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--text); text-align: left; background: none; border: 0; cursor: pointer; transition: background .15s, color .15s; white-space: nowrap; }
+.strat-dropdown button svg { width: 14px; height: 14px; flex-shrink: 0; opacity: .75; }
+.strat-dropdown button:hover { background: var(--raise); color: #ffffff; }
+.strat-dropdown button:hover svg { opacity: 1; }
+.strat-dropdown button.menu-danger { color: var(--down); }
+.strat-dropdown button.menu-danger:hover { background: color-mix(in srgb, var(--down) 15%, transparent); color: var(--down); }
+.strat-dropdown .menu-sep { height: 1px; background: var(--line); margin: 3px 0; }
 .strat .acts { display: flex; gap: 2px; } .strat .acts button { width: 26px; height: 26px; border-radius: 6px; color: var(--muted); display: grid; place-items: center; } .strat .acts button:hover { background: var(--bg); color: var(--text); }
 .strat.off { opacity: .55; } .strat.busy .nm::after { content: " running"; color: var(--accent); font-weight: 400; font-size: 12px; }
 .dock-toggle { position: absolute; right: 78px; top: 10px; }
