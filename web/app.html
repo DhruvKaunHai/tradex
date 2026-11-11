@@ -47,8 +47,19 @@
             <button data-dock="chart" aria-pressed="true">Chart</button>
             <button data-dock="cloud" aria-pressed="false">Cloud <span id="cloudCount" style="opacity:0.75;font-size:10px;margin-left:3px">0</span></button>
           </div>
-          <button class="btn small primary" id="addStrat">Add</button>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button class="btn small" id="dockSelectBtn" title="Select multiple strategies">Select</button>
+            <button class="btn small primary" id="addStrat">Add</button>
+          </div>
         </header>
+        <div id="dockBatchBar" class="dock-batch-bar hide">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;font-weight:600">
+            <input type="checkbox" id="dockSelectAll"> Select All
+          </label>
+          <span class="spacer"></span>
+          <span id="dockSelCount" style="font-size:11.5px;color:var(--muted)">0 selected</span>
+          <button class="btn small primary" id="dockBatchAction">Upload to Cloud</button>
+        </div>
         <div class="list scroll" id="stratList"></div>
         <div class="list scroll hide" id="cloudList"></div>
       </aside>
@@ -85,6 +96,46 @@
     <section class="view col" id="v-data"></section>
     <section class="view col" id="v-settings"></section>
   </main>
+</div>
+<div class="modal-overlay hide" id="batchModal">
+  <div class="modal-box">
+    <header class="modal-header">
+      <div>
+        <h3 style="font-size:15px;margin:0">Upload Strategies to Cloud</h3>
+        <p class="muted" style="font-size:12px;margin:2px 0 0">Select multiple strategies to run 24/7 on the cloud server</p>
+      </div>
+      <button class="icon-btn" id="batchModalClose" aria-label="Close">✕</button>
+    </header>
+    <div style="display:flex;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--bg);flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px">
+        <span class="muted">Symbol:</span>
+        <select id="batchSymSel" class="inp" style="padding:3px 8px;font-size:12px">
+          <option value="NIFTY">NIFTY 50</option>
+          <option value="BANKNIFTY">BANK NIFTY</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px">
+        <span class="muted">Timeframe:</span>
+        <select id="batchTfSel" class="inp" style="padding:3px 8px;font-size:12px">
+          <option value="5">5 min</option>
+          <option value="15" selected>15 min</option>
+          <option value="30">30 min</option>
+        </select>
+      </div>
+      <span class="spacer"></span>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;font-weight:600">
+        <input type="checkbox" id="batchModalSelectAll"> Select All
+      </label>
+    </div>
+    <div class="scroll" style="max-height:320px;padding:8px 14px;display:flex;flex-direction:column;gap:6px" id="batchModalList"></div>
+    <footer style="padding:10px 14px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);background:var(--surface)">
+      <span id="batchModalCount" style="font-size:12px;color:var(--muted)">0 selected</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn small" id="batchModalCancel">Cancel</button>
+        <button class="btn small primary" id="batchModalDeploy">Upload to Cloud</button>
+      </div>
+    </footer>
+  </div>
 </div>
 <div class="tip" id="tip"></div>
 <div class="toast-wrap" id="toasts"></div>

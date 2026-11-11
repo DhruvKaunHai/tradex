@@ -110,6 +110,17 @@ h1, h2, h3 { font-family: var(--display); font-weight: 600; margin: 0; letter-sp
 .strat-dropdown .menu-sep { height: 1px; background: var(--line); margin: 3px 0; }
 .strat .acts { display: flex; gap: 2px; } .strat .acts button { width: 26px; height: 26px; border-radius: 6px; color: var(--muted); display: grid; place-items: center; } .strat .acts button:hover { background: var(--bg); color: var(--text); }
 .strat.off { opacity: .55; } .strat.busy .nm::after { content: " running"; color: var(--accent); font-weight: 400; font-size: 12px; }
+.dock-batch-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px; background: var(--bg); border-bottom: 1px solid var(--line); font-size: 12px; animation: viewIn .2s; }
+.strat-check { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; margin: 0; }
+.strat.selectable { cursor: pointer; }
+.strat.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--raise)); }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .68); backdrop-filter: blur(4px); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; animation: fadeIn .18s; }
+.modal-box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r3); box-shadow: 0 20px 50px rgba(0, 0, 0, .6); width: 100%; max-width: 480px; display: flex; flex-direction: column; overflow: hidden; animation: viewIn .2s; }
+.modal-header { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+.batch-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r2); background: var(--raise); cursor: pointer; transition: background .15s, border-color .15s; font-size: 13px; }
+.batch-item:hover { background: var(--bg); }
+.batch-item.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--raise)); }
+.batch-item .batch-title { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dock-toggle { position: absolute; right: 78px; top: 10px; }
 .tradecard { position: absolute; z-index: 5; left: 12px; bottom: 78px; background: var(--raise); border: 1px solid var(--line); border-radius: var(--r2); padding: 10px 12px; font-size: 12.5px; box-shadow: 0 12px 30px rgba(0, 0, 0, .35); min-width: 210px; animation: viewIn .18s; }
 .tradecard dl { display: grid; grid-template-columns: auto auto; gap: 2px 14px; margin: 6px 0 0; } .tradecard dt { color: var(--muted); } .tradecard dd { margin: 0; text-align: right; }

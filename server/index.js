@@ -616,40 +616,49 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/cloud-strats') {
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
-        if (!body.code) return send(req, res, 400, { error: 'Pine code is required' });
-        const chk = Pine.check(body.code);
-        if (chk) return send(req, res, 400, { error: chk.message, line: chk.line });
-        const id = body.id || ('cs_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
-        const idx = cloudStrats.findIndex(s => s.id === id);
-        const item = {
-          id,
-          name: String(body.name || 'Cloud Strategy').trim(),
-          symbol: String(body.symbol || 'NIFTY').toUpperCase(),
-          tf: +body.tf || 15,
-          code: String(body.code),
-          inputs: body.inputs || {},
-          enabled: body.enabled !== false,
-          createdAt: body.createdAt || Date.now()
-        };
-        if (idx >= 0) {
-          item._knownEntries = cloudStrats[idx]._knownEntries;
-          item._knownExits = cloudStrats[idx]._knownExits;
-          item._alertInit = cloudStrats[idx]._alertInit;
-          cloudStrats[idx] = item;
-        } else {
-          cloudStrats.push(item);
+        const list = Array.isArray(body) ? body : Array.isArray(body.strats) ? body.strats : [body];
+        const added = [];
+        for (const b of list) {
+          if (!b.code) continue;
+          const chk = Pine.check(b.code);
+          if (chk) continue;
+          const id = b.id || ('cs_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+          const idx = cloudStrats.findIndex(s => s.id === id);
+          const item = {
+            id,
+            name: String(b.name || 'Cloud Strategy').trim(),
+            symbol: String(b.symbol || 'NIFTY').toUpperCase(),
+            tf: +b.tf || 15,
+            code: String(b.code),
+            inputs: b.inputs || {},
+            enabled: b.enabled !== false,
+            createdAt: b.createdAt || Date.now()
+          };
+          if (idx >= 0) {
+            item._knownEntries = cloudStrats[idx]._knownEntries;
+            item._knownExits = cloudStrats[idx]._knownExits;
+            item._alertInit = cloudStrats[idx]._alertInit;
+            cloudStrats[idx] = item;
+          } else {
+            cloudStrats.push(item);
+          }
+          added.push(item);
         }
         saveCloudStrats();
         runCloudStrats();
-        return send(req, res, 200, { ok: true, strat: { id: item.id, name: item.name, symbol: item.symbol, tf: item.tf, enabled: item.enabled } });
+        if (list.length === 1 && !added.length) {
+          return send(req, res, 400, { error: 'Invalid strategy code' });
+        }
+        return send(req, res, 200, { ok: true, count: added.length, strat: added[0], strats: added });
       }
       return send(req, res, 200, { ok: true, strats: cloudStrats.map(s => ({ id: s.id, name: s.name, symbol: s.symbol, tf: s.tf, inputs: s.inputs, enabled: s.enabled !== false, createdAt: s.createdAt, lastError: s.lastError })) });
     }
     if (p === '/api/cloud-strats/delete' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req));
-      cloudStrats = cloudStrats.filter(s => s.id !== body.id);
+      const ids = Array.isArray(body.ids) ? body.ids : (body.id ? [body.id] : []);
+      cloudStrats = cloudStrats.filter(s => !ids.includes(s.id));
       saveCloudStrats();
-      return send(req, res, 200, { ok: true });
+      return send(req, res, 200, { ok: true, deleted: ids.length });
     }
     if (p === '/api/cloud-strats/toggle' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req));

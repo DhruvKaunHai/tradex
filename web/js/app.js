@@ -216,6 +216,246 @@ async function deployScriptToCloud(id, name, code, inputs) {
   }
 }
 
+let dockSelectMode = false;
+const selectedChartIds = new Set();
+const selectedCloudIds = new Set();
+const selectedModalIds = new Set();
+
+function updateBatchBar() {
+  const bar = $('#dockBatchBar');
+  const btn = $('#dockSelectBtn');
+  if (!bar || !btn) return;
+
+  if (!dockSelectMode) {
+    bar.classList.add('hide');
+    btn.textContent = 'Select';
+    btn.classList.remove('primary');
+    return;
+  }
+
+  bar.classList.remove('hide');
+  btn.textContent = 'Cancel';
+  btn.classList.add('primary');
+
+  const countEl = $('#dockSelCount');
+  const actBtn = $('#dockBatchAction');
+  const selectAll = $('#dockSelectAll');
+
+  if (dockTab === 'chart') {
+    const total = A.strats.length;
+    const count = selectedChartIds.size;
+    if (countEl) countEl.textContent = `${count} of ${total} selected`;
+    if (actBtn) {
+      actBtn.textContent = `Upload to Cloud (${count})`;
+      actBtn.disabled = count === 0;
+      actBtn.className = 'btn small primary';
+    }
+    if (selectAll) selectAll.checked = total > 0 && count === total;
+  } else {
+    const total = cloudStrats.length;
+    const count = selectedCloudIds.size;
+    if (countEl) countEl.textContent = `${count} of ${total} selected`;
+    if (actBtn) {
+      actBtn.textContent = `Delete Selected (${count})`;
+      actBtn.disabled = count === 0;
+      actBtn.className = 'btn small';
+      actBtn.style.color = 'var(--down)';
+    }
+    if (selectAll) selectAll.checked = total > 0 && count === total;
+  }
+}
+
+const selBtn = $('#dockSelectBtn');
+if (selBtn) {
+  selBtn.onclick = () => {
+    dockSelectMode = !dockSelectMode;
+    if (!dockSelectMode) {
+      selectedChartIds.clear();
+      selectedCloudIds.clear();
+    }
+    updateBatchBar();
+    paintDock();
+    if (dockTab === 'cloud') paintCloudList();
+  };
+}
+
+const selAllInp = $('#dockSelectAll');
+if (selAllInp) {
+  selAllInp.onchange = () => {
+    if (dockTab === 'chart') {
+      if (selAllInp.checked) A.strats.forEach(s => selectedChartIds.add(s.id));
+      else selectedChartIds.clear();
+      updateBatchBar();
+      paintDock();
+    } else {
+      if (selAllInp.checked) cloudStrats.forEach(s => selectedCloudIds.add(s.id));
+      else selectedCloudIds.clear();
+      updateBatchBar();
+      paintCloudList();
+    }
+  };
+}
+
+const batchActBtn = $('#dockBatchAction');
+if (batchActBtn) {
+  batchActBtn.onclick = async () => {
+    if (dockTab === 'chart') {
+      if (selectedChartIds.size === 0) return toast('Select at least one strategy', true);
+      const toDeploy = [];
+      for (const sid of selectedChartIds) {
+        const S = A.strats.find(s => s.id === sid);
+        if (!S) continue;
+        const sc = scripts.find(x => x.id === S.scriptId);
+        if (!sc) continue;
+        toDeploy.push({ id: S.scriptId, name: S.name, symbol: A.symbol, tf: A.tf, code: sc.code, inputs: S.inputs || {} });
+      }
+      if (!toDeploy.length) return toast('No valid strategies found', true);
+      toast(`Uploading ${toDeploy.length} strategies to Cloud...`);
+      try {
+        const res = await fetch(`${API}/api/cloud-strats`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ strats: toDeploy })
+        });
+        const j = await res.json();
+        if (j && j.ok) {
+          toast(`${j.count || toDeploy.length} strategies uploaded to Cloud.`);
+          selectedChartIds.clear();
+          dockSelectMode = false;
+          updateBatchBar();
+          paintDock();
+          fetchCloudStrats();
+        } else {
+          toast(`Upload failed: ${(j && j.error) || 'Server error'}`, true);
+        }
+      } catch (e) { toast(`Upload failed: ${e.message}`, true); }
+    } else {
+      if (selectedCloudIds.size === 0) return toast('Select at least one strategy', true);
+      if (!confirm(`Delete ${selectedCloudIds.size} strategies from Cloud?`)) return;
+      try {
+        const res = await fetch(`${API}/api/cloud-strats/delete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: [...selectedCloudIds] })
+        });
+        const j = await res.json();
+        if (j && j.ok) {
+          cloudStrats = cloudStrats.filter(s => !selectedCloudIds.has(s.id));
+          selectedCloudIds.clear();
+          dockSelectMode = false;
+          updateBatchBar();
+          const cc = $('#cloudCount'); if (cc) cc.textContent = cloudStrats.length;
+          paintCloudList();
+          toast('Strategies deleted from Cloud.');
+        } else {
+          toast('Delete failed', true);
+        }
+      } catch (e) { toast('Delete failed', true); }
+    }
+  };
+}
+
+function openBatchModal() {
+  const m = $('#batchModal');
+  if (!m) return;
+  m.classList.remove('hide');
+  selectedModalIds.clear();
+
+  const all = [...scripts];
+  TX_SAMPLES.forEach((s, i) => {
+    if (!all.some(x => x.name === s.name)) {
+      all.push({ id: 'sample_' + i, name: s.name, code: s.code, isSample: true });
+    }
+  });
+
+  all.forEach(s => selectedModalIds.add(s.id));
+  $('#batchSymSel').value = A.symbol || 'NIFTY';
+  $('#batchTfSel').value = String(A.tf || 15);
+  renderBatchModalList(all);
+}
+
+function renderBatchModalList(all) {
+  const listEl = $('#batchModalList');
+  if (!listEl) return;
+  listEl.innerHTML = all.map(s => {
+    const sel = selectedModalIds.has(s.id);
+    return `<label class="batch-item ${sel ? 'selected' : ''}" data-mid="${s.id}">
+      <input type="checkbox" class="strat-check" ${sel ? 'checked' : ''}>
+      <span class="batch-title">${esc(s.name)}</span>
+      ${s.isSample ? '<span class="muted" style="font-size:11px">Starter</span>' : ''}
+    </label>`;
+  }).join('');
+
+  const countEl = $('#batchModalCount');
+  if (countEl) countEl.textContent = `${selectedModalIds.size} of ${all.length} selected`;
+  const allBox = $('#batchModalSelectAll');
+  if (allBox) allBox.checked = selectedModalIds.size === all.length && all.length > 0;
+
+  $$('.batch-item', listEl).forEach(item => {
+    item.onclick = ev => {
+      ev.preventDefault();
+      const mid = item.dataset.mid;
+      if (selectedModalIds.has(mid)) selectedModalIds.delete(mid);
+      else selectedModalIds.add(mid);
+      renderBatchModalList(all);
+    };
+  });
+}
+
+const bmClose = $('#batchModalClose');
+const bmCancel = $('#batchModalCancel');
+if (bmClose) bmClose.onclick = () => $('#batchModal').classList.add('hide');
+if (bmCancel) bmCancel.onclick = () => $('#batchModal').classList.add('hide');
+
+const bmSelAll = $('#batchModalSelectAll');
+if (bmSelAll) {
+  bmSelAll.onchange = () => {
+    const all = [...scripts];
+    TX_SAMPLES.forEach((s, i) => {
+      if (!all.some(x => x.name === s.name)) all.push({ id: 'sample_' + i, name: s.name, code: s.code });
+    });
+    if (bmSelAll.checked) all.forEach(s => selectedModalIds.add(s.id));
+    else selectedModalIds.clear();
+    renderBatchModalList(all);
+  };
+}
+
+const bmDeploy = $('#batchModalDeploy');
+if (bmDeploy) {
+  bmDeploy.onclick = async () => {
+    if (selectedModalIds.size === 0) return toast('Select at least one strategy', true);
+    const all = [...scripts];
+    TX_SAMPLES.forEach((s, i) => {
+      if (!all.some(x => x.name === s.name)) all.push({ id: 'sample_' + i, name: s.name, code: s.code });
+    });
+    const sym = $('#batchSymSel').value;
+    const tf = +$('#batchTfSel').value || 15;
+    const toDeploy = [];
+    for (const mid of selectedModalIds) {
+      const s = all.find(x => x.id === mid);
+      if (!s || !s.code) continue;
+      toDeploy.push({ id: s.id, name: s.name, symbol: sym, tf, code: s.code, inputs: {} });
+    }
+    if (!toDeploy.length) return toast('No valid strategies found', true);
+    toast(`Uploading ${toDeploy.length} strategies to Cloud...`);
+    try {
+      const res = await fetch(`${API}/api/cloud-strats`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strats: toDeploy })
+      });
+      const j = await res.json();
+      if (j && j.ok) {
+        toast(`${j.count || toDeploy.length} strategies uploaded to Cloud.`);
+        $('#batchModal').classList.add('hide');
+        fetchCloudStrats();
+      } else {
+        toast(`Upload failed: ${(j && j.error) || 'Server error'}`, true);
+      }
+    } catch (e) { toast(`Upload failed: ${e.message}`, true); }
+  };
+}
+
 function closeAllStratMenus() {
   $$('.strat-dropdown').forEach(m => m.classList.add('hide'));
   $$('.strat').forEach(s => s.classList.remove('menu-open'));
@@ -231,35 +471,42 @@ function paintDock() {
   } else {
     el.innerHTML = A.strats.map(S => {
       const M = inPeriod(S).metrics;
-      return `<div class="strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''}" data-id="${S.id}">
-        <i class="dot" style="background:${S.color}"></i>
+      const isSel = selectedChartIds.has(S.id);
+      return `<div class="strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''} ${dockSelectMode ? 'selectable' : ''} ${isSel ? 'selected' : ''}" data-id="${S.id}">
+        ${dockSelectMode
+          ? `<input type="checkbox" class="strat-check" ${isSel ? 'checked' : ''} aria-label="Select strategy">`
+          : `<i class="dot" style="background:${S.color}"></i>`
+        }
         <span class="nm" title="${esc(S.name || '')}">${esc(S.name || 'Strategy')}</span>
-        <div class="strat-menu">
-          <button class="strat-menu-btn" data-m="btn" title="Options" aria-label="Strategy options">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
-          </button>
-          <div class="strat-dropdown hide">
-            <button data-a="cloud">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
-              Deploy to Cloud
-            </button>
-            <button data-a="eye">
-              ${S.visible
-                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20M9.88 9.88a3 3 0 1 0 4.24 4.24M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/></svg>Hide on Chart`
-                : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>Show on Chart`
-              }
-            </button>
-            <button data-a="edit">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-              Edit Script
-            </button>
-            <div class="menu-sep"></div>
-            <button data-a="del" class="menu-danger">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-              Remove from Chart
-            </button>
-          </div>
-        </div>
+        ${dockSelectMode
+          ? `<span style="width:26px"></span>`
+          : `<div class="strat-menu">
+              <button class="strat-menu-btn" data-m="btn" title="Options" aria-label="Strategy options">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
+              </button>
+              <div class="strat-dropdown hide">
+                <button data-a="cloud">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+                  Deploy to Cloud
+                </button>
+                <button data-a="eye">
+                  ${S.visible
+                    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20M9.88 9.88a3 3 0 1 0 4.24 4.24M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/></svg>Hide on Chart`
+                    : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>Show on Chart`
+                  }
+                </button>
+                <button data-a="edit">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                  Edit Script
+                </button>
+                <div class="menu-sep"></div>
+                <button data-a="del" class="menu-danger">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                  Remove from Chart
+                </button>
+              </div>
+            </div>`
+        }
         <span class="sub">
           ${S.error ? `<span class="down">Line ${S.error.line || '?'}: ${esc(S.error.message)}</span>` : M ? `<span class="${cls(M.all.pts)}" style="font-weight:800">${M.all.pts >= 0 ? '+' : '−'}${Math.abs(M.all.pts).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts</span><span>${M.all.n} trades</span><span>${M.all.winRate.toFixed(0)}% won</span><span>DD ${M.dd.maxPct.toFixed(1)}%</span><span class="${cls(M.net)}" style="opacity:.75">${sinr(M.net)}</span>` : S.result ? '<span>Indicator, no trades</span>' : '<span>Waiting</span>'}
         </span>
@@ -268,6 +515,16 @@ function paintDock() {
 
     $$('.strat', el).forEach(row => {
       const S = A.strats.find(s => s.id === row.dataset.id);
+      if (dockSelectMode) {
+        row.onclick = ev => {
+          ev.stopPropagation();
+          if (selectedChartIds.has(S.id)) selectedChartIds.delete(S.id);
+          else selectedChartIds.add(S.id);
+          updateBatchBar();
+          paintDock();
+        };
+        return;
+      }
       const mBtn = row.querySelector('[data-m="btn"]');
       const mDrop = row.querySelector('.strat-dropdown');
       if (mBtn && mDrop) {
@@ -312,57 +569,67 @@ function paintCloudList() {
   if (!cloudStrats.length) {
     el.innerHTML = `<div class="empty" style="padding:20px 8px">
       <p style="margin-bottom:10px;line-height:1.5">No 24/7 cloud strategies active. Any strategy deployed to Cloud sends Telegram alerts 24/7 even when your browser and PC are closed.</p>
-      <button class="btn small primary" id="pushCurToCloud">Deploy Active Strategy to Cloud</button>
+      <button class="btn small primary" id="pushCurToCloud">+ Upload Strategies to Cloud</button>
     </div>`;
     const btn = $('#pushCurToCloud');
-    if (btn) btn.onclick = () => {
-      if (A.strats.length) {
-        const S = A.strats[0], sc = scripts.find(x => x.id === S.scriptId);
-        if (sc) deployScriptToCloud(S.scriptId, S.name, sc.code, S.inputs);
-      } else {
-        go('editor');
-      }
-    };
+    if (btn) btn.onclick = openBatchModal;
     return;
   }
   el.innerHTML = cloudStrats.map(cs => {
-    return `<div class="strat ${cs.enabled ? '' : 'off'}" data-cid="${cs.id}">
-      <i class="dot" style="background:${cs.enabled ? 'var(--up)' : 'var(--muted)'}"></i>
+    const isSel = selectedCloudIds.has(cs.id);
+    return `<div class="strat ${cs.enabled ? '' : 'off'} ${dockSelectMode ? 'selectable' : ''} ${isSel ? 'selected' : ''}" data-cid="${cs.id}">
+      ${dockSelectMode
+        ? `<input type="checkbox" class="strat-check" ${isSel ? 'checked' : ''} aria-label="Select strategy">`
+        : `<i class="dot" style="background:${cs.enabled ? 'var(--up)' : 'var(--muted)'}"></i>`
+      }
       <span class="nm" title="${esc(cs.name)}">${esc(cs.name)}</span>
-      <div class="strat-menu">
-        <button class="strat-menu-btn" data-m="btn" title="Options" aria-label="Cloud strategy options">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
-        </button>
-        <div class="strat-dropdown hide">
-          <button data-ca="toggle">
-            ${cs.enabled
-              ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>Pause 24/7 Run`
-              : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Activate 24/7 Run`
-            }
-          </button>
-          <button data-ca="edit">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-            Edit Script
-          </button>
-          <div class="menu-sep"></div>
-          <button data-ca="del" class="menu-danger">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-            Delete from Cloud
-          </button>
-        </div>
-      </div>
+      ${dockSelectMode
+        ? `<span style="width:26px"></span>`
+        : `<div class="strat-menu">
+            <button class="strat-menu-btn" data-m="btn" title="Options" aria-label="Cloud strategy options">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
+            </button>
+            <div class="strat-dropdown hide">
+              <button data-ca="toggle">
+                ${cs.enabled
+                  ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>Pause 24/7 Run`
+                  : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Activate 24/7 Run`
+                }
+              </button>
+              <button data-ca="edit">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                Edit Script
+              </button>
+              <div class="menu-sep"></div>
+              <button data-ca="del" class="menu-danger">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                Delete from Cloud
+              </button>
+            </div>
+          </div>`
+      }
       <span class="sub">
         <span style="font-weight:600">${esc(cs.symbol || 'NIFTY')} · ${cs.tf || 15}m</span>
         <span style="color:${cs.enabled ? 'var(--up)' : 'var(--muted)'}">${cs.enabled ? 'Active 24/7' : 'Paused'}</span>
         ${cs.lastError ? `<span class="down" title="${esc(cs.lastError)}">Error</span>` : ''}
       </span>
     </div>`;
-  }).join('') + `<div style="padding:8px 4px"><button class="btn small" style="width:100%" id="deployMoreBtn">+ Deploy From Editor</button></div>`;
+  }).join('') + `<div style="padding:8px 4px"><button class="btn small primary" style="width:100%" id="deployMoreBtn">+ Upload Strategies to Cloud</button></div>`;
 
   $$('.strat[data-cid]', el).forEach(row => {
     const cid = row.dataset.cid;
     const cs = cloudStrats.find(x => x.id === cid);
     if (!cs) return;
+    if (dockSelectMode) {
+      row.onclick = ev => {
+        ev.stopPropagation();
+        if (selectedCloudIds.has(cs.id)) selectedCloudIds.delete(cs.id);
+        else selectedCloudIds.add(cs.id);
+        updateBatchBar();
+        paintCloudList();
+      };
+      return;
+    }
     const mBtn = row.querySelector('[data-m="btn"]');
     const mDrop = row.querySelector('.strat-dropdown');
     if (mBtn && mDrop) {
@@ -430,7 +697,7 @@ function paintCloudList() {
     }));
   });
   const dm = $('#deployMoreBtn');
-  if (dm) dm.onclick = () => go('editor');
+  if (dm) dm.onclick = openBatchModal;
 }
 
 // Wire dock tabs
@@ -443,6 +710,8 @@ if (dtChart && dtCloud) {
     dtCloud.setAttribute('aria-pressed', 'false');
     $('#stratList').classList.remove('hide');
     $('#cloudList').classList.add('hide');
+    updateBatchBar();
+    paintDock();
   };
   dtCloud.onclick = () => {
     dockTab = 'cloud';
@@ -450,6 +719,7 @@ if (dtChart && dtCloud) {
     dtChart.setAttribute('aria-pressed', 'false');
     $('#stratList').classList.add('hide');
     $('#cloudList').classList.remove('hide');
+    updateBatchBar();
     fetchCloudStrats();
   };
 }
