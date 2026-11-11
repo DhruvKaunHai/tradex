@@ -399,9 +399,14 @@ class TXChart {
     const pill = (x, yy, txt, bg, fg, align) => { c.font = `700 10px ${col.font}`; const w = c.measureText(txt).width + 10, h = 16, px = align === 'l' ? x : align === 'r' ? x - w : x - w / 2; c.fillStyle = bg; c.beginPath(); c.roundRect(px, yy - h / 2, w, h, 4); c.fill(); c.fillStyle = fg; c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillText(txt, px + 5, yy + 0.5); return px + w / 2; };
     let shown = 0; const dense = bw < 3; c.save();
     const blueBox = col.blue || '#2962ff';
+    const yellowBox = '#ffb224';
     for (let k = lo; k < tr.length && shown < 1500; k++) {
       const t = tr[k]; if (t.ei > i1) break; shown++;
-      const isExited = !t.open && t.reason !== 'Still open';
+      const isOpen = !!(t.open || (t.ref && t.ref.open) || t.reason === 'Still open' || (t.ref && t.ref.reason === 'Still open'));
+      const isExited = !isOpen;
+      const boxCol = isOpen ? yellowBox : blueBox;
+      const boxTextCol = isOpen ? '#111111' : '#ffffff';
+
       const x1 = this.x(t.ei), x2 = this.x(t.xi), y1 = y(t.ep), y2 = y(t.xp), win = t.pnl >= 0, rc = win ? col.up : col.down, long = t.dir > 0;
 
       // ONLY show red/green box when it exits
@@ -409,28 +414,28 @@ class TXChart {
         c.fillStyle = rc; c.globalAlpha = dense ? 0.10 : 0.14; c.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.max(1, Math.abs(x2 - x1)), Math.max(1, Math.abs(y2 - y1))); c.globalAlpha = 1;
         c.strokeStyle = rc; c.globalAlpha = dense ? 0.55 : 0.9; c.lineWidth = dense ? 1 : 1.4; c.setLineDash(dense ? [] : [5, 4]); c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke(); c.setLineDash([]); c.globalAlpha = 1;
       } else {
-        // Open trade: dashed blue tracking line to current candle
-        c.strokeStyle = blueBox; c.globalAlpha = 0.7; c.lineWidth = 1.2; c.setLineDash([4, 4]); c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke(); c.setLineDash([]); c.globalAlpha = 1;
+        // Ongoing trade: dashed yellow tracking line to current candle
+        c.strokeStyle = yellowBox; c.globalAlpha = 0.8; c.lineWidth = 1.3; c.setLineDash([4, 4]); c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke(); c.setLineDash([]); c.globalAlpha = 1;
       }
       if (dense) continue;
 
-      // entry and exit price levels
-      c.lineWidth = 1.5; c.strokeStyle = blueBox; c.globalAlpha = 0.8; c.beginPath(); c.moveTo(x1 - bw * 0.6, y1); c.lineTo(x1 + Math.max(bw * 0.6, Math.min(x2 - x1, 40)), y1); c.stroke(); c.globalAlpha = 1;
+      // entry and exit price levels: yellow if ongoing, blue if completed
+      c.lineWidth = 1.5; c.strokeStyle = boxCol; c.globalAlpha = 0.8; c.beginPath(); c.moveTo(x1 - bw * 0.6, y1); c.lineTo(x1 + Math.max(bw * 0.6, Math.min(x2 - x1, 40)), y1); c.stroke(); c.globalAlpha = 1;
       if (isExited) {
         c.strokeStyle = rc; c.beginPath(); c.moveTo(x2 - Math.max(bw * 0.6, Math.min(x2 - x1, 40)), y2); c.lineTo(x2 + bw * 0.6, y2); c.stroke();
       }
 
-      // entry arrow: in blue box color
+      // entry arrow: yellow if ongoing, blue if completed
       const ey = long ? y(d.l[t.ei]) + 6 : y(d.h[t.ei]) - 6;
-      c.fillStyle = blueBox; c.beginPath(); if (long) { c.moveTo(x1, ey); c.lineTo(x1 - 6, ey + 9); c.lineTo(x1 + 6, ey + 9); } else { c.moveTo(x1, ey); c.lineTo(x1 - 6, ey - 9); c.lineTo(x1 + 6, ey - 9); } c.fill();
+      c.fillStyle = boxCol; c.beginPath(); if (long) { c.moveTo(x1, ey); c.lineTo(x1 - 6, ey + 9); c.lineTo(x1 + 6, ey + 9); } else { c.moveTo(x1, ey); c.lineTo(x1 - 6, ey - 9); c.lineTo(x1 + 6, ey - 9); } c.fill();
       const py = long ? ey + 19 : ey - 19;
 
-      // BUY/SELL in BLUE box with entrypoint price!
+      // BUY/SELL pill: YELLOW for ongoing trades, BLUE for completed trades!
       const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 2 });
       const entryText = bw >= 5 ? `${long ? 'BUY' : 'SELL'} @ ${epStr}` : (long ? 'BUY' : 'SELL');
-      if (bw >= 3.5) pill(x1, py, entryText, blueBox, '#ffffff', 'c');
+      if (bw >= 3.5) pill(x1, py, entryText, boxCol, boxTextCol, 'c');
 
-      // Exit marker and exit pills: ONLY when it exits
+      // Exit marker and exit pills: STRICTLY ONLY when trade is squared off / completed (NEVER for ongoing trades!)
       if (isExited) {
         c.strokeStyle = col.text; c.lineWidth = 1.5; c.fillStyle = rc; c.beginPath(); c.arc(x2, y2, 4.5, 0, 7); c.fill(); c.stroke();
         const ly = y2;
