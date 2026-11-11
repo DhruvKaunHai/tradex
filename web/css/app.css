@@ -83,9 +83,17 @@ h1, h2, h3 { font-family: var(--display); font-weight: 600; margin: 0; letter-sp
 #v-chart { flex-direction: row; }
 .chart-wrap { flex: 1; position: relative; min-width: 0; background: var(--surface); }
 .chart-host { position: absolute; inset: 0; } .tx-chart { display: block; cursor: crosshair; outline: none; touch-action: none; } .tx-chart.grab { cursor: grabbing; }
-.legend { position: absolute; left: 12px; top: 10px; pointer-events: none; display: flex; flex-direction: column; gap: 4px; max-width: calc(100% - 100px); }
+.legend { position: absolute; left: 12px; top: 10px; pointer-events: none; display: flex; flex-direction: column; gap: 4px; max-width: calc(100% - 100px); z-index: 20; }
 .legend .row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; font-size: 12.5px; background: color-mix(in srgb, var(--surface) 78%, transparent); padding: 1px 6px; border-radius: 4px; width: fit-content; max-width: 100%; }
+.legend .row.legend-ohlc { align-items: center; }
 .legend .name { font: 600 15px var(--display); } .legend span b { font-weight: 500; color: var(--muted); margin-right: 4px; }
+.legend .legend-toggle { pointer-events: auto; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; background: color-mix(in srgb, var(--raise) 85%, transparent); border: 1px solid var(--line); color: var(--text); font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 4px; margin-left: 6px; transition: background .15s, border-color .15s, color .15s; }
+.legend .legend-toggle:hover { background: var(--raise); border-color: var(--muted); }
+.legend .legend-toggle svg { transition: transform .2s cubic-bezier(0.2, 0.8, 0.3, 1); }
+.legend .legend-toggle.open svg { transform: rotate(180deg); }
+.legend .legend-strats { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; overflow-x: hidden; pointer-events: auto; padding-right: 4px; }
+.legend .legend-strats::-webkit-scrollbar { width: 5px; }
+.legend .legend-strats::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 .ranges { position: absolute; left: 12px; bottom: 36px; display: flex; gap: 2px; background: color-mix(in srgb, var(--surface) 86%, transparent); backdrop-filter: blur(6px); border: 1px solid var(--line); border-radius: var(--r2); padding: 2px; }
 .ranges button { padding: 4px 9px; border-radius: 6px; font-size: 12px; color: var(--muted); font-weight: 500; } .ranges button:hover { background: var(--raise); color: var(--text); }
 .ranges input { width: 128px; background: none; border: 0; color: var(--muted); font-size: 12px; padding: 0 6px; color-scheme: inherit; }

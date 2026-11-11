@@ -123,11 +123,32 @@ chart.on('cross', e => { crossI = e.active ? e.index : -1; paintLegend(); });
 chart.on('view', e => $('#goLatest').classList.toggle('hide', !e.away));
 $('#goLatest').onclick = () => chart.goLatest();
 chart.on('click', e => { if (e.trade) { const S = A.strats.find(s => s.id === e.layer.id); showTradeCard(S, e.trade.ref || e.trade, true); } else $('#tradeCard').innerHTML = ''; });
+let legendCollapsed = localStorage.getItem('tx_legend_collapsed') !== '0';
+$('#legend').addEventListener('click', e => {
+  const btn = e.target.closest('#legendToggle');
+  if (btn) {
+    e.stopPropagation();
+    legendCollapsed = !legendCollapsed;
+    try { localStorage.setItem('tx_legend_collapsed', legendCollapsed ? '1' : '0'); } catch (err) {}
+    paintLegend();
+  }
+});
 function paintLegend() {
   const d = A.data[key(A.symbol, A.tf)], el = $('#legend'); if (!d || !d.t.length) { el.innerHTML = ''; return; }
   const i = crossI >= 0 && crossI < d.t.length ? crossI : d.t.length - 1, ch = i > 0 ? d.c[i] - d.c[i - 1] : 0, c = d.c[i] >= d.o[i] ? 'up' : 'down';
-  let h = `<div class="row"><span class="name">${SYMS[A.symbol]}</span><span class="muted">${A.tf} min, ${dtstr(d.t[i])}</span><span><b>O</b><i class="${c}" style="font-style:normal">${f2(d.o[i])}</i></span><span><b>H</b><i class="${c}" style="font-style:normal">${f2(d.h[i])}</i></span><span><b>L</b><i class="${c}" style="font-style:normal">${f2(d.l[i])}</i></span><span><b>C</b><i class="${c}" style="font-style:normal">${f2(d.c[i])}</i></span><span class="${cls(ch)}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)}</span></div>`;
-  for (const S of A.strats) { if (!S.visible || !S.layer) continue; const vals = S.layer.plots.slice(0, 5).map(p => { const v = p.data[i]; return v === v ? `<span><b>${esc(p.title)}</b>${f2(v)}</span>` : ''; }).join(''); h += `<div class="row"><span><i class="dot" style="background:${S.color}"></i> ${esc(S.name)}</span>${vals}</div>`; }
+  const activeStrats = A.strats.filter(S => S.visible && S.layer);
+  const stratCount = activeStrats.length;
+  const toggleBtn = stratCount > 0 ? `<button class="legend-toggle${legendCollapsed ? '' : ' open'}" id="legendToggle" type="button" title="${legendCollapsed ? 'Show strategy indicators' : 'Hide strategy indicators'}"><span>${stratCount} ${stratCount === 1 ? 'Strategy' : 'Strategies'}</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></button>` : '';
+  let h = `<div class="row legend-ohlc"><span class="name">${SYMS[A.symbol]}</span><span class="muted">${A.tf} min, ${dtstr(d.t[i])}</span><span><b>O</b><i class="${c}" style="font-style:normal">${f2(d.o[i])}</i></span><span><b>H</b><i class="${c}" style="font-style:normal">${f2(d.h[i])}</i></span><span><b>L</b><i class="${c}" style="font-style:normal">${f2(d.l[i])}</i></span><span><b>C</b><i class="${c}" style="font-style:normal">${f2(d.c[i])}</i></span><span class="${cls(ch)}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)}</span>${toggleBtn}</div>`;
+  if (stratCount > 0 && !legendCollapsed) {
+    let stratsHtml = '<div class="legend-strats scroll">';
+    for (const S of activeStrats) {
+      const vals = S.layer.plots.slice(0, 5).map(p => { const v = p.data[i]; return v === v ? `<span><b>${esc(p.title)}</b>${f2(v)}</span>` : ''; }).join('');
+      stratsHtml += `<div class="row"><span><i class="dot" style="background:${S.color}"></i> ${esc(S.name)}</span>${vals}</div>`;
+    }
+    stratsHtml += '</div>';
+    h += stratsHtml;
+  }
   el.innerHTML = h;
 }
 $$('#ranges button').forEach(b => (b.onclick = () => { const days = +b.dataset.r; if (!days) chart.fitAll(); else chart.showLast(Math.round(days * 375 / A.tf)); }));
