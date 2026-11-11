@@ -29,7 +29,7 @@ for (const s in SYMBOLS) store[s] = { t: [], o: [], h: [], l: [], c: [], ver: 0,
 /* ---------- telegram alerts ---------- */
 const TELEGRAM_FILE = path.join(DATA, 'telegram.json');
 let telegramConfig = {
-  token: process.env.TELEGRAM_BOT_TOKEN || '9025942462:AAECO53vcE7HPwkR9KcyAlrudmeP1zvqAJo',
+  token: process.env.TELEGRAM_BOT_TOKEN || '',
   chatId: process.env.TELEGRAM_CHAT_ID || '1149546127',
   enabled: true,
   notifyEntries: true,

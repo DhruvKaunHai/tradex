@@ -1037,6 +1037,13 @@ function renderSettings() {
         <input type="text" id="tgChatInp" class="inp" style="flex:1;min-width:180px;font-family:monospace;font-size:12px" value="${esc(tgConfig.chatId || '1149546127')}" placeholder="Your Chat ID">
         <button class="btn small" id="tgDetectBtn" title="Auto-detect Chat ID from Telegram">Auto-Detect Chat ID</button>
       </div>
+      <details style="margin-top:2px">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none">Change or Rotate Bot Token</summary>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+          <label style="font-weight:600;font-size:12px;min-width:90px">Bot Token:</label>
+          <input type="password" id="tgTokenInp" class="inp" style="flex:1;min-width:220px;font-family:monospace;font-size:12px" placeholder="Paste new token from @BotFather">
+        </div>
+      </details>
       <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin:4px 0">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="tgEnableInp" ${tgConfig.enabled ? 'checked' : ''}> Enable Notifications</label>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="tgEntryInp" ${tgConfig.notifyEntries ? 'checked' : ''}> Trade Entries (BUY / SELL)</label>
@@ -1079,14 +1086,24 @@ function renderSettings() {
     tgConfig.notifyEntries = $('#tgEntryInp').checked;
     tgConfig.notifyExits = $('#tgExitInp').checked;
     tgConfig.notifyMarket = $('#tgMarketInp').checked;
+    const newTok = $('#tgTokenInp') ? $('#tgTokenInp').value.trim() : '';
+    const payload = { ...tgConfig };
+    if (newTok) payload.token = newTok;
     try {
       const res = await fetch(`${API}/api/telegram/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(tgConfig)
+        body: JSON.stringify(payload)
       });
       const j = await res.json();
-      if (j && j.ok) setTgStatus('Telegram settings saved successfully.', false, true);
+      if (j && j.ok) {
+        if (newTok) {
+          $('#tgTokenInp').value = '';
+          setTgStatus('Telegram token and settings updated successfully.', false, true);
+        } else {
+          setTgStatus('Telegram settings saved successfully.', false, true);
+        }
+      }
       else setTgStatus(`Failed to save: ${esc(j ? j.error : 'Server error')}`, true);
     } catch (e) {
       setTgStatus(`Failed to save: ${esc(e.message)}`, true);
