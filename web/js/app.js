@@ -153,7 +153,7 @@ function paintLegend() {
 }
 $$('#ranges button').forEach(b => (b.onclick = () => { const days = +b.dataset.r; if (!days) chart.fitAll(); else chart.showLast(Math.round(days * 375 / A.tf)); }));
 $('#jump').onchange = e => { if (e.target.value) chart.goToTime(Date.parse(e.target.value + 'T09:15:00+05:30') / 1000); };
-$('#dockToggle').onclick = () => { $('#dock').classList.toggle('closed'); setTimeout(() => chart.resize(), 300); };
+$('#dockToggle').onclick = () => { $('#dock').classList.toggle('closed'); setTimeout(() => { chart.resize(); paintDockTabs(); }, 300); };
 function showTradeCard(S, tr, atCursor) {
   if (!S || !tr) return; const el = $('#tradeCard');
   const isOpen = !!(tr.open || tr.reason === 'Still open' || (tr.ref && (tr.ref.open || tr.ref.reason === 'Still open')));
@@ -206,6 +206,26 @@ function addToChart(scriptId, inputs) { let S = A.strats.find(s => s.scriptId ==
 let dockTab = 'chart';
 let cloudStrats = [];
 
+function paintDockTabs() {
+  const seg = $('#dockTabs');
+  if (!seg) return;
+  const th = $('.thumb', seg);
+  const activeBtn = $(`button[data-dock="${dockTab}"]`, seg) || $('button[data-dock="chart"]', seg);
+  $$('button', seg).forEach(b => b.setAttribute('aria-pressed', String(b === activeBtn)));
+  if (th && activeBtn) {
+    const update = () => {
+      if (activeBtn.offsetWidth > 0) {
+        th.style.left = activeBtn.offsetLeft + 'px';
+        th.style.width = activeBtn.offsetWidth + 'px';
+        th.style.opacity = '1';
+      }
+    };
+    update();
+    setTimeout(update, 50);
+  }
+}
+window.addEventListener('resize', paintDockTabs);
+
 async function fetchCloudStrats() {
   try {
     const res = await fetch(`${API}/api/cloud-strats`);
@@ -214,6 +234,7 @@ async function fetchCloudStrats() {
       if (j && j.strats) cloudStrats = j.strats;
       const cc = $('#cloudCount');
       if (cc) cc.textContent = cloudStrats.length;
+      paintDockTabs();
       if (dockTab === 'cloud') paintCloudList();
     }
   } catch (_) {}
@@ -490,6 +511,7 @@ document.addEventListener('click', e => {
 });
 
 function paintDock() {
+  paintDockTabs();
   const el = $('#stratList');
   if (!A.strats.length) {
     el.innerHTML = `<div class="empty" style="padding:20px 8px"><p>No strategy on the chart. Add as many as you like, they all run on the full history.</p><button class="btn primary" data-go="editor">Write or pick a strategy</button></div>`;
@@ -731,8 +753,7 @@ const dtCloud = $('[data-dock="cloud"]');
 if (dtChart && dtCloud) {
   dtChart.onclick = () => {
     dockTab = 'chart';
-    dtChart.setAttribute('aria-pressed', 'true');
-    dtCloud.setAttribute('aria-pressed', 'false');
+    paintDockTabs();
     $('#stratList').classList.remove('hide');
     $('#cloudList').classList.add('hide');
     updateBatchBar();
@@ -740,8 +761,7 @@ if (dtChart && dtCloud) {
   };
   dtCloud.onclick = () => {
     dockTab = 'cloud';
-    dtCloud.setAttribute('aria-pressed', 'true');
-    dtChart.setAttribute('aria-pressed', 'false');
+    paintDockTabs();
     $('#stratList').classList.add('hide');
     $('#cloudList').classList.remove('hide');
     updateBatchBar();
@@ -1116,7 +1136,7 @@ function renderSettings() {
 /* ---------- start ---------- */
 for (const o of store.get('onchart', [])) if (scripts.find(s => s.id === o.scriptId)) A.strats.push({ id: uid(), scriptId: o.scriptId, color: o.color, visible: o.visible !== false, inputs: o.inputs || {}, name: scripts.find(s => s.id === o.scriptId).name });
 if (innerWidth < 900) $('#dock').classList.add('closed');
-paintSyms(); paintDock(); pushLayers(); go(location.hash.slice(1) || 'chart'); requestAnimationFrame(paintTf); if (document.fonts && document.fonts.ready) document.fonts.ready.then(paintTf);
+paintSyms(); paintDock(); pushLayers(); go(location.hash.slice(1) || 'chart'); requestAnimationFrame(() => { paintTf(); paintDockTabs(); }); if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { paintTf(); paintDockTabs(); });
 fetchTgConfig();
 fetchCloudStrats();
 refreshStatus().then(() => switchData()); connect(); setInterval(paintFeed, 1000); setInterval(refreshStatus, 30000);

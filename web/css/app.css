@@ -99,7 +99,14 @@ h1, h2, h3 { font-family: var(--display); font-weight: 600; margin: 0; letter-sp
 .ranges input { width: 128px; background: none; border: 0; color: var(--muted); font-size: 12px; padding: 0 6px; color-scheme: inherit; }
 .dock { width: 292px; border-left: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; flex: none; transition: margin-right .28s cubic-bezier(.2, .8, .3, 1); }
 .dock.closed { margin-right: -292px; }
-.dock header { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); } .dock header h2 { font-size: 15px; }
+.dock header { padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); gap: 8px; } .dock header h2 { font-size: 15px; }
+.dock-seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r2); padding: 2px; position: relative; align-items: center; }
+.dock-seg .thumb { position: absolute; top: 2px; bottom: 2px; border-radius: 6px; background: var(--accent); transition: left .24s cubic-bezier(.2, .8, .25, 1), width .24s cubic-bezier(.2, .8, .25, 1); z-index: 0; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); }
+.dock-seg button { padding: 5px 12px; border-radius: 6px; font-size: 12.5px; font-weight: 600; color: var(--muted); position: relative; z-index: 1; transition: color .2s ease; display: inline-flex; align-items: center; gap: 5px; background: none; border: none; cursor: pointer; }
+.dock-seg button:hover:not([aria-pressed="true"]) { color: var(--text); }
+.dock-seg button[aria-pressed="true"] { color: var(--accent-ink); font-weight: 700; }
+.dock-cloud-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 1; background: color-mix(in srgb, var(--surface) 80%, transparent); color: inherit; transition: background .2s ease, color .2s ease; }
+.dock-seg button[aria-pressed="true"] .dock-cloud-badge { background: rgba(0, 0, 0, 0.18); color: var(--accent-ink); }
 .dock .list { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .strat { border: 1px solid var(--line); border-radius: var(--r2); padding: 10px; display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; background: var(--raise); animation: viewIn .25s; position: relative; }
 .strat.menu-open { z-index: 60; }

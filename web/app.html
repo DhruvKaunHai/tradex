@@ -43,9 +43,10 @@
       </div>
       <aside class="dock" id="dock">
         <header>
-          <div class="seg" id="dockTabs" style="display:inline-flex">
+          <div class="seg dock-seg" id="dockTabs">
+            <i class="thumb"></i>
             <button data-dock="chart" aria-pressed="true">Chart</button>
-            <button data-dock="cloud" aria-pressed="false">Cloud <span id="cloudCount" style="opacity:0.75;font-size:10px;margin-left:3px">0</span></button>
+            <button data-dock="cloud" aria-pressed="false">Cloud <span id="cloudCount" class="dock-cloud-badge">0</span></button>
           </div>
           <div style="display:flex;gap:6px;align-items:center">
             <button class="btn small" id="dockSelectBtn" title="Select multiple strategies">Select</button>
