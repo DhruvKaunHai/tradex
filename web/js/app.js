@@ -312,12 +312,12 @@ async function renderData() {
 
 /* ---------- telegram alerts ---------- */
 let tgConfig = {
-  token: '9025942462:AAECO53vcE7HPwkR9KcyAlrudmeP1zvqAJo',
   chatId: '',
   enabled: true,
   notifyEntries: true,
   notifyExits: true,
-  notifyMarket: true
+  notifyMarket: true,
+  configured: false
 };
 async function fetchTgConfig() {
   try {
@@ -431,8 +431,11 @@ function renderSettings() {
     <header><h3>Telegram Alerts</h3><p>Instant trading alerts and daily market summaries delivered to your Telegram</p></header>
     <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <label style="font-weight:600;font-size:12px;min-width:90px">Bot Token:</label>
-        <input type="text" id="tgTokenInp" class="inp" style="flex:1;min-width:280px;font-family:monospace;font-size:11px" value="${esc(tgConfig.token || '')}" placeholder="Telegram Bot Token">
+        <span style="font-weight:600;font-size:12px;min-width:90px">Telegram Bot:</span>
+        <span style="font-size:12px;color:var(--text);display:inline-flex;align-items:center;gap:6px">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#35d6ae"></span>
+          <b>@TradeX_terminal_bot</b> <span class="muted">(Secured on Server)</span>
+        </span>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <label style="font-weight:600;font-size:12px;min-width:90px">Chat ID:</label>
@@ -476,7 +479,6 @@ function renderSettings() {
   }
 
   $('#tgSaveBtn').onclick = async () => {
-    tgConfig.token = $('#tgTokenInp').value.trim();
     tgConfig.chatId = $('#tgChatInp').value.trim();
     tgConfig.enabled = $('#tgEnableInp').checked;
     tgConfig.notifyEntries = $('#tgEntryInp').checked;
@@ -498,9 +500,8 @@ function renderSettings() {
 
   $('#tgDetectBtn').onclick = async () => {
     setTgStatus('🔍 Checking Telegram for your chat ID...', false, false);
-    const token = $('#tgTokenInp').value.trim();
     try {
-      const res = await fetch(`${API}/api/telegram/detect?token=${encodeURIComponent(token)}`);
+      const res = await fetch(`${API}/api/telegram/detect`);
       const j = await res.json();
       if (j && j.ok && j.chatId) {
         tgConfig.chatId = j.chatId;
@@ -516,14 +517,13 @@ function renderSettings() {
 
   $('#tgTestBtn').onclick = async () => {
     setTgStatus('🚀 Sending test alert to Telegram...', false, false);
-    const token = $('#tgTokenInp').value.trim();
     const chatId = $('#tgChatInp').value.trim();
     if (!chatId) return setTgStatus('❌ Chat ID is empty! Please open @TradeX_terminal_bot, tap Start, then click Auto-Detect first.', true);
     try {
       const res = await fetch(`${API}/api/telegram/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, chatId })
+        body: JSON.stringify({ chatId })
       });
       const j = await res.json();
       if (j && j.ok) setTgStatus('🎉 Test notification delivered! Check your Telegram.', false, true);

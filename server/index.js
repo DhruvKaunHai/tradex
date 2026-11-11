@@ -419,31 +419,37 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/telegram/config') {
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
-        if (body.token !== undefined) telegramConfig.token = String(body.token).trim();
+        if (body.token) telegramConfig.token = String(body.token).trim();
         if (body.chatId !== undefined) telegramConfig.chatId = String(body.chatId).trim();
         if (body.enabled !== undefined) telegramConfig.enabled = !!body.enabled;
         if (body.notifyEntries !== undefined) telegramConfig.notifyEntries = !!body.notifyEntries;
         if (body.notifyExits !== undefined) telegramConfig.notifyExits = !!body.notifyExits;
         if (body.notifyMarket !== undefined) telegramConfig.notifyMarket = !!body.notifyMarket;
         saveTelegramConfig();
-        return send(req, res, 200, { ok: true, config: telegramConfig });
+        return send(req, res, 200, { ok: true, config: { chatId: telegramConfig.chatId, enabled: telegramConfig.enabled, notifyEntries: telegramConfig.notifyEntries, notifyExits: telegramConfig.notifyExits, notifyMarket: telegramConfig.notifyMarket, configured: !!telegramConfig.token } });
       }
-      return send(req, res, 200, { ok: true, config: telegramConfig });
+      return send(req, res, 200, { ok: true, config: { chatId: telegramConfig.chatId, enabled: telegramConfig.enabled, notifyEntries: telegramConfig.notifyEntries, notifyExits: telegramConfig.notifyExits, notifyMarket: telegramConfig.notifyMarket, configured: !!telegramConfig.token } });
     }
     if (p === '/api/telegram/detect') {
-      const r = await detectTelegramChatId(u.searchParams.get('token'));
+      const r = await detectTelegramChatId();
       return send(req, res, 200, r);
     }
     if (p === '/api/telegram/test' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req));
+      const targetChat = body.chatId || telegramConfig.chatId;
+      const d = new Date(Date.now() + IST * 1000);
+      let h = d.getUTCHours(), m = d.getUTCMinutes();
+      const ap = h >= 12 ? 'PM' : 'AM';
+      h = h % 12; if (!h) h = 12;
+      const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ap}`;
       const text = [
         '🔔 <b>TRADEX NOTIFICATION TEST</b>',
         '━━━━━━━━━━━━━━━━━━━━━',
         '✅ Telegram bot connected successfully!',
         '📈 Live alerts for BUY / SELL entries, trade exits, and market open/close summaries are active.',
-        `⏰ Time: ${new Date((Date.now() + IST) * 1000).toISOString().slice(11, 19)} IST`
+        `⏰ Time: ${timeStr} IST`
       ].join('\n');
-      const r = await sendTelegram(text, body.token, body.chatId);
+      const r = await sendTelegram(text, null, targetChat);
       return send(req, res, 200, r);
     }
     if (p === '/api/telegram/send' && req.method === 'POST') {
