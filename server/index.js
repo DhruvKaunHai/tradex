@@ -254,7 +254,48 @@ function saveCloudStrats() {
       createdAt: s.createdAt || Date.now()
     }));
     fs.writeFileSync(CLOUD_STRATS_FILE, JSON.stringify(clean, null, 2));
+    queueGitHubSync();
   } catch (e) { log('Cloud strats save error:', e.message); }
+}
+
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+const GITHUB_REPO = process.env.GITHUB_REPO || 'DhruvKaunHai/tradex';
+let syncGhTimer = null;
+async function syncCloudStratsToGitHub() {
+  if (!GITHUB_TOKEN || !GITHUB_REPO || !fs.existsSync(CLOUD_STRATS_FILE)) return;
+  try {
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/data/cloud_strats.json`;
+    const headers = {
+      'Authorization': `Bearer ${GITHUB_TOKEN}`,
+      'User-Agent': 'TradeX-Server',
+      'Accept': 'application/vnd.github.v3+json'
+    };
+    const curRes = await fetch(url, { headers });
+    let sha = null;
+    if (curRes.ok) {
+      const curData = await curRes.json();
+      sha = curData.sha;
+    }
+    const content = fs.readFileSync(CLOUD_STRATS_FILE, 'utf8');
+    const putRes = await fetch(url, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        message: 'Auto-sync cloud strategies',
+        content: Buffer.from(content).toString('base64'),
+        sha: sha || undefined,
+        branch: 'main'
+      })
+    });
+    if (putRes.ok) log('Synced cloud strategies to GitHub repository');
+    else log('GitHub sync status:', putRes.status);
+  } catch (err) {
+    log('GitHub sync error:', err.message);
+  }
+}
+function queueGitHubSync() {
+  if (syncGhTimer) clearTimeout(syncGhTimer);
+  syncGhTimer = setTimeout(syncCloudStratsToGitHub, 15000);
 }
 loadCloudStrats();
 
