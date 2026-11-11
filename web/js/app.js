@@ -165,6 +165,7 @@ async function runStrat(S, quiet) {
     S.metrics = r.isStrategy ? Metrics.compute(r.trades, r.equity, data.t, r.capital, data.c) : null;
     const pad = (arr, Ctor, fill) => { if (!offset && arr.length === n) return arr; const out = new Ctor(n); if (fill !== undefined) out.fill(fill); out.set(arr.subarray ? arr.subarray(0, Math.min(arr.length, n - offset)) : arr, offset); return out; };
     S.layer = { id: S.id, name: S.name, color: S.color, overlay: r.meta.overlay, visible: S.visible, plots: r.plots.map(p => ({ title: p.title, data: pad(p.data, Float64Array, NaN), ci: pad(p.ci, Uint8Array), pal: p.pal, width: p.width })), hlines: r.hlines, shapes: offset ? r.shapes.map(s => Object.assign({}, s, { i: s.i + offset })) : r.shapes, bg: offset ? r.bg.map(b => [b[0] + offset, b[1]]) : r.bg, trades: r.trades.map(t => ({ ei: t.ei + offset, xi: t.xi + offset, ep: t.ep, xp: t.xp, dir: t.dir, pnl: t.pnl, pts: t.pts, ref: t })) };
+    if (r.isStrategy && r.trades) watchTradeAlerts(S, r.trades, data, sym, tf);
   } catch (err) { S.error = err; S.result = null; S.layer = null; S.metrics = null; }
   S.busy = false; paintDock(); pushLayers(); paintLegend(); if (!quiet && S.scriptId === curId) { $('#prog').style.width = '0'; afterRun(S); } if (['report', 'trades', 'compare'].includes(A.view)) renderView();
 }
@@ -309,14 +310,229 @@ async function renderData() {
       const c = $('#cov-' + s); if (c) { c.innerHTML = h; $('#covn-' + s).textContent = `Each bar is a month, height is the number of trading days loaded.${low ? ` ${low} month${low > 1 ? 's look' : ' looks'} incomplete (red).` : ''}`; } } catch (e) { /* card already shows the status */ } }
 }
 
+/* ---------- telegram alerts ---------- */
+let tgConfig = {
+  token: '9025942462:AAECO53vcE7HPwkR9KcyAlrudmeP1zvqAJo',
+  chatId: '',
+  enabled: true,
+  notifyEntries: true,
+  notifyExits: true,
+  notifyMarket: true
+};
+async function fetchTgConfig() {
+  try {
+    const res = await fetch(`${API}/api/telegram/config`);
+    if (res.ok) {
+      const j = await res.json();
+      if (j && j.config) tgConfig = Object.assign(tgConfig, j.config);
+    }
+  } catch (_) {}
+}
+function fmtIST(epochSec) {
+  if (!epochSec) return '';
+  const d = new Date((epochSec + IST) * 1000);
+  let h = d.getUTCHours(), m = d.getUTCMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
+}
+
+function watchTradeAlerts(S, trades, data, sym, tf) {
+  if (!tgConfig.enabled || !tgConfig.chatId) return;
+  if (!trades || !trades.length || !data || !data.t.length) return;
+
+  if (!S._knownEntries) S._knownEntries = new Set();
+  if (!S._knownExits) S._knownExits = new Set();
+
+  const symName = SYMS[sym] || sym;
+  const stratName = S.name || 'Strategy';
+  const lastBarIdx = data.t.length - 1;
+
+  if (!S._alertInit) {
+    S._alertInit = true;
+    for (const t of trades) {
+      const ek = `${sym}_${tf}_${t.ei}_${t.et}_${t.dir}`;
+      S._knownEntries.add(ek);
+      if (!t.open && t.reason !== 'Still open') {
+        const xk = `${sym}_${tf}_${t.xi}_${t.xt}_${t.dir}`;
+        S._knownExits.add(xk);
+      }
+    }
+    return;
+  }
+
+  for (const t of trades) {
+    const isRecentEntry = t.ei >= lastBarIdx - 1;
+    const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1;
+
+    // 1. Entry alert
+    const ek = `${sym}_${tf}_${t.ei}_${t.et}_${t.dir}`;
+    if (isRecentEntry && !S._knownEntries.has(ek)) {
+      S._knownEntries.add(ek);
+      const action = t.dir > 0 ? 'BUY' : 'SELL';
+      const icon = t.dir > 0 ? '🟢' : '🔴';
+      const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const timeStr = fmtIST(t.et || data.t[t.ei] || Math.floor(Date.now() / 1000));
+
+      const msg = [
+        `${icon} <b>NEW TRADE EXECUTED</b>`,
+        '━━━━━━━━━━━━━━━━━━━━━',
+        `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
+        `🎯 <b>Action</b>: ${action} @ ${epStr} Pts.`,
+        `🧠 <b>Strategy</b>: ${stratName}`,
+        `⏰ <b>Time</b>: ${timeStr} IST`
+      ].join('\n');
+
+      fetch(`${API}/api/telegram/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'entry', text: msg })
+      }).catch(() => {});
+    }
+
+    // 2. Exit alert
+    const xk = `${sym}_${tf}_${t.xi}_${t.xt}_${t.dir}`;
+    if (isRecentExit && !S._knownExits.has(xk)) {
+      S._knownExits.add(xk);
+      const pts = t.pts != null ? t.pts : (t.xp - t.ep) * t.dir;
+      const isWin = pts >= 0;
+      const ptsSign = isWin ? '+' : '−';
+      const ptsAbs = Math.abs(pts).toFixed(2);
+      const xpStr = t.xp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const timeStr = fmtIST(t.xt || data.t[t.xi] || Math.floor(Date.now() / 1000));
+      const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
+      const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
+
+      const msg = [
+        '🏁 <b>TRADE COMPLETED</b>',
+        '━━━━━━━━━━━━━━━━━━━━━',
+        `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
+        `🎯 <b>Action</b>: EXIT ${t.dir > 0 ? 'BUY' : 'SELL'}${reason}`,
+        `💰 <b>Exit Price</b>: ${xpStr} Pts.`,
+        `📊 <b>Result</b>: ${resPill}`,
+        `🧠 <b>Strategy</b>: ${stratName}`,
+        `⏰ <b>Time</b>: ${timeStr} IST`
+      ].join('\n');
+
+      fetch(`${API}/api/telegram/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'exit', text: msg })
+      }).catch(() => {});
+    }
+  }
+}
+
 /* ---------- settings tab ---------- */
 function renderSettings() {
   const el = $('#v-settings');
   el.innerHTML = `<div class="rep-head"><h2>Settings</h2></div><div class="scroll" style="flex:1"><div class="rep-body"><div class="cols">
+  <div class="panel" style="grid-column:1/-1">
+    <header><h3>Telegram Alerts</h3><p>Instant trading alerts and daily market summaries delivered to your Telegram</p></header>
+    <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label style="font-weight:600;font-size:12px;min-width:90px">Bot Token:</label>
+        <input type="text" id="tgTokenInp" class="inp" style="flex:1;min-width:280px;font-family:monospace;font-size:11px" value="${esc(tgConfig.token || '')}" placeholder="Telegram Bot Token">
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label style="font-weight:600;font-size:12px;min-width:90px">Chat ID:</label>
+        <input type="text" id="tgChatInp" class="inp" style="flex:1;min-width:180px;font-family:monospace;font-size:12px" value="${esc(tgConfig.chatId || '')}" placeholder="Your Chat ID (click Auto-Detect)">
+        <button class="btn small" id="tgDetectBtn" title="Auto-detect Chat ID after tapping Start in Telegram">🔍 Auto-Detect Chat ID</button>
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin:4px 0">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="tgEnableInp" ${tgConfig.enabled ? 'checked' : ''}> Enable Notifications</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="tgEntryInp" ${tgConfig.notifyEntries ? 'checked' : ''}> Trade Entries (BUY / SELL)</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="tgExitInp" ${tgConfig.notifyExits ? 'checked' : ''}> Trade Exits (Points & Win/Loss)</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="tgMarketInp" ${tgConfig.notifyMarket ? 'checked' : ''}> Market Open / Close (09:15 / 15:30)</label>
+      </div>
+      <div id="tgStatusMsg" style="font-size:12px;min-height:18px;font-weight:500"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <button class="btn primary small" id="tgSaveBtn">💾 Save Telegram Settings</button>
+        <button class="btn small" id="tgTestBtn">📲 Send Test Alert</button>
+        <a href="https://t.me/TradeX_terminal_bot" target="_blank" class="btn small" style="text-decoration:none">Open @TradeX_terminal_bot ↗</a>
+      </div>
+      <p class="note" style="margin-top:6px;line-height:1.6">
+        <b>Quick 10-Second Setup:</b><br>
+        1. Open <a href="https://t.me/TradeX_terminal_bot" target="_blank" style="color:var(--accent)">@TradeX_terminal_bot</a> in Telegram and click <b>Start</b>.<br>
+        2. Click <b>🔍 Auto-Detect Chat ID</b> above. It will automatically retrieve your numeric Chat ID.<br>
+        3. Click <b>📲 Send Test Alert</b> to confirm instant notification delivery!
+      </p>
+    </div>
+  </div>
   <div class="panel"><header><h3>Look</h3></header><div class="chips"><button class="chip" data-th="dark" aria-pressed="${settings.theme === 'dark'}">Dark</button><button class="chip" data-th="light" aria-pressed="${settings.theme === 'light'}">Light</button></div></div>
   <div class="panel"><header><h3>Keyboard</h3></header><dl class="kv"><dt>Run the backtest</dt><dd><kbd>Ctrl</kbd> <kbd>Enter</kbd></dd><dt>Save the script</dt><dd><kbd>Ctrl</kbd> <kbd>S</kbd></dd><dt>Move the chart</dt><dd><kbd>←</kbd> <kbd>→</kbd> or drag</dd><dt>Zoom</dt><dd>Mouse wheel, <kbd>+</kbd> <kbd>−</kbd></dd><dt>Latest candles</dt><dd><kbd>End</kbd> or double click</dd><dt>Whole history</dt><dd><kbd>Home</kbd></dd></dl></div>
   <div class="panel"><header><h3>Pine support</h3><p>${Pine.functions.length} built-in functions</p></header><p class="note" style="line-height:1.7">Works: strategy and indicator scripts in v5 or v6 style, inputs, var, if, for, while, switch, your own functions, arrays, history like close[1], the common ta.* and math.* functions, strategy.entry, exit (stop, target, trailing), close, close_all, plot, plotshape, hline and bgcolor.<br>Not available: request.security, libraries, tables, labels and boxes (drawings are skipped, the logic still runs), matrices and maps. The editor names the line when a script uses something missing.</p></div>
   <div class="panel"><header><h3>Workspace</h3></header><dl class="kv"><dt>Server address</dt><dd>${esc(API || location.origin)}</dd><dt>Scripts saved in this browser</dt><dd>${scripts.length}</dd></dl><p style="margin:12px 0 0;display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" id="expAll">Back up all scripts</button><button class="btn small" id="resetAll">Clear this browser's TradeX data</button></p><p class="note" style="margin-top:8px">Scripts and settings live in this browser only. Back them up before clearing browser data or moving to another computer.</p></div></div></div></div>`;
+
+  const setTgStatus = (msg, isErr, isOk) => {
+    const s = $('#tgStatusMsg'); if (!s) return;
+    s.innerHTML = msg;
+    s.style.color = isErr ? 'var(--down)' : isOk ? 'var(--up)' : 'var(--muted)';
+  };
+  if (tgConfig.chatId) {
+    setTgStatus(`🟢 Connected to Chat ID: <b>${esc(tgConfig.chatId)}</b> (@TradeX_terminal_bot)`, false, true);
+  } else {
+    setTgStatus('⚠️ Please open @TradeX_terminal_bot in Telegram, tap Start, then click Auto-Detect Chat ID.', false, false);
+  }
+
+  $('#tgSaveBtn').onclick = async () => {
+    tgConfig.token = $('#tgTokenInp').value.trim();
+    tgConfig.chatId = $('#tgChatInp').value.trim();
+    tgConfig.enabled = $('#tgEnableInp').checked;
+    tgConfig.notifyEntries = $('#tgEntryInp').checked;
+    tgConfig.notifyExits = $('#tgExitInp').checked;
+    tgConfig.notifyMarket = $('#tgMarketInp').checked;
+    try {
+      const res = await fetch(`${API}/api/telegram/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(tgConfig)
+      });
+      const j = await res.json();
+      if (j && j.ok) setTgStatus('✅ Telegram settings saved successfully!', false, true);
+      else setTgStatus(`❌ Failed to save: ${esc(j ? j.error : 'Server error')}`, true);
+    } catch (e) {
+      setTgStatus(`❌ Failed to save: ${esc(e.message)}`, true);
+    }
+  };
+
+  $('#tgDetectBtn').onclick = async () => {
+    setTgStatus('🔍 Checking Telegram for your chat ID...', false, false);
+    const token = $('#tgTokenInp').value.trim();
+    try {
+      const res = await fetch(`${API}/api/telegram/detect?token=${encodeURIComponent(token)}`);
+      const j = await res.json();
+      if (j && j.ok && j.chatId) {
+        tgConfig.chatId = j.chatId;
+        $('#tgChatInp').value = j.chatId;
+        setTgStatus(`✅ Detected Chat ID: <b>${esc(j.chatId)}</b>${j.name ? ` (${esc(j.name)})` : ''}! Saved.`, false, true);
+      } else {
+        setTgStatus(`❌ ${esc((j && j.error) || 'Could not find message. Make sure you opened @TradeX_terminal_bot and tapped Start!')}`, true);
+      }
+    } catch (e) {
+      setTgStatus(`❌ Error detecting chat: ${esc(e.message)}`, true);
+    }
+  };
+
+  $('#tgTestBtn').onclick = async () => {
+    setTgStatus('🚀 Sending test alert to Telegram...', false, false);
+    const token = $('#tgTokenInp').value.trim();
+    const chatId = $('#tgChatInp').value.trim();
+    if (!chatId) return setTgStatus('❌ Chat ID is empty! Please open @TradeX_terminal_bot, tap Start, then click Auto-Detect first.', true);
+    try {
+      const res = await fetch(`${API}/api/telegram/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, chatId })
+      });
+      const j = await res.json();
+      if (j && j.ok) setTgStatus('🎉 Test notification delivered! Check your Telegram.', false, true);
+      else setTgStatus(`❌ Delivery failed: ${esc((j && j.error) || 'Telegram API error')}`, true);
+    } catch (e) {
+      setTgStatus(`❌ Delivery failed: ${esc(e.message)}`, true);
+    }
+  };
+
   $$('[data-th]', el).forEach(b => (b.onclick = () => { settings.theme = b.dataset.th; applyTheme(); }));
   $('#expAll').onclick = () => download('TradeX scripts backup.json', JSON.stringify(scripts, null, 1));
   $('#resetAll').onclick = () => { if (confirm('Delete all scripts and settings saved in this browser? This cannot be undone.')) { Object.keys(localStorage).filter(k => k.startsWith('tx.')).forEach(k => localStorage.removeItem(k)); location.reload(); } };
@@ -326,6 +542,7 @@ function renderSettings() {
 for (const o of store.get('onchart', [])) if (scripts.find(s => s.id === o.scriptId)) A.strats.push({ id: uid(), scriptId: o.scriptId, color: o.color, visible: o.visible !== false, inputs: o.inputs || {}, name: scripts.find(s => s.id === o.scriptId).name });
 if (innerWidth < 900) $('#dock').classList.add('closed');
 paintSyms(); paintDock(); pushLayers(); go(location.hash.slice(1) || 'chart'); requestAnimationFrame(paintTf); if (document.fonts && document.fonts.ready) document.fonts.ready.then(paintTf);
+fetchTgConfig();
 refreshStatus().then(() => switchData()); connect(); setInterval(paintFeed, 1000); setInterval(refreshStatus, 30000);
 window.TX = { A, chart };
 })();

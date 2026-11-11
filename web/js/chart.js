@@ -337,8 +337,8 @@ class TXChart {
     c.fillStyle = col.muted; c.font = `11px ${col.font}`; c.textAlign = 'left'; c.textBaseline = 'middle';
     const crossY = (this.cross && this.cross.x < pw && this.cross.y < mainH) ? Math.round(this.cross.y) : -999;
     for (const [v, yy] of pticks) {
-      if (ly > 0 && ly < mainH && yy >= ly - 14 && yy <= ly + 32) continue;
-      if (crossY > 0 && Math.abs(yy - crossY) < 14) continue;
+      if (ly > 0 && ly < mainH && yy >= ly - 24 && yy <= ly + 38) continue;
+      if (crossY > 0 && Math.abs(yy - crossY) < 18) continue;
       const dec = ps < 1 ? 2 : (ps < 10 && v % 1 !== 0 ? 1 : 0);
       c.fillText(v.toLocaleString('en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }), pw + 8, yy);
     }

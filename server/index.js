@@ -26,6 +26,148 @@ const SYMBOLS = {
 const store = {};
 for (const s in SYMBOLS) store[s] = { t: [], o: [], h: [], l: [], c: [], ver: 0, dirty: false, cache: {}, price: null, priceAt: 0, prevClose: null, source: '', lastOk: 0, lastErr: '', fails: 0, seeded: false };
 
+/* ---------- telegram alerts ---------- */
+const TELEGRAM_FILE = path.join(DATA, 'telegram.json');
+let telegramConfig = {
+  token: process.env.TELEGRAM_BOT_TOKEN || '9025942462:AAECO53vcE7HPwkR9KcyAlrudmeP1zvqAJo',
+  chatId: process.env.TELEGRAM_CHAT_ID || '',
+  enabled: true,
+  notifyEntries: true,
+  notifyExits: true,
+  notifyMarket: true
+};
+function loadTelegramConfig() {
+  if (fs.existsSync(TELEGRAM_FILE)) {
+    try {
+      const j = JSON.parse(fs.readFileSync(TELEGRAM_FILE, 'utf8'));
+      telegramConfig = Object.assign(telegramConfig, j);
+    } catch (e) { log('Telegram config read error:', e.message); }
+  }
+}
+function saveTelegramConfig() {
+  try {
+    fs.mkdirSync(DATA, { recursive: true });
+    fs.writeFileSync(TELEGRAM_FILE, JSON.stringify(telegramConfig, null, 2));
+  } catch (e) { log('Telegram config save error:', e.message); }
+}
+loadTelegramConfig();
+
+async function sendTelegram(text, customToken, customChatId) {
+  const token = customToken || telegramConfig.token;
+  const chatId = customChatId || telegramConfig.chatId;
+  if (!token || !chatId) return { ok: false, error: 'Bot token or Chat ID is missing' };
+  const postData = JSON.stringify({
+    chat_id: chatId,
+    text: text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  });
+  return new Promise(ok => {
+    const req = https.request({
+      hostname: 'api.telegram.org',
+      path: `/bot${encodeURIComponent(token)}/sendMessage`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    }, res => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(d);
+          if (j && j.ok) ok({ ok: true, result: j.result });
+          else ok({ ok: false, error: (j && j.description) || 'Telegram error' });
+        } catch (e) { ok({ ok: false, error: 'Invalid response from Telegram' }); }
+      });
+    });
+    req.on('error', e => ok({ ok: false, error: e.message }));
+    req.setTimeout(8000, () => { req.destroy(); ok({ ok: false, error: 'Telegram request timeout' }); });
+    req.write(postData);
+    req.end();
+  });
+}
+
+async function detectTelegramChatId(customToken) {
+  const token = customToken || telegramConfig.token;
+  if (!token) return { ok: false, error: 'Bot token is missing' };
+  return new Promise(ok => {
+    https.get(`https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates`, res => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(d);
+          if (!j.ok) return ok({ ok: false, error: j.description || 'Invalid bot token' });
+          const updates = j.result || [];
+          for (let i = updates.length - 1; i >= 0; i--) {
+            const m = updates[i].message || updates[i].channel_post;
+            if (m && m.chat && m.chat.id) {
+              const detected = String(m.chat.id);
+              telegramConfig.chatId = detected;
+              saveTelegramConfig();
+              return ok({ ok: true, chatId: detected, name: m.from ? `${m.from.first_name || ''} ${m.from.last_name || ''}`.trim() : '' });
+            }
+          }
+          return ok({ ok: false, error: 'No messages found yet. Please open @TradeX_terminal_bot in Telegram and tap Start!' });
+        } catch (e) { ok({ ok: false, error: e.message }); }
+      });
+    }).on('error', e => ok({ ok: false, error: e.message }));
+  });
+}
+
+let lastOpenAlert = '', lastCloseAlert = '';
+function checkMarketAlerts() {
+  if (!telegramConfig.enabled || !telegramConfig.notifyMarket || !telegramConfig.chatId) return;
+  const now = Date.now() / 1000;
+  const wd = new Date((now + IST) * 1000).getUTCDay();
+  if (wd < 1 || wd > 5) return;
+  const m = minOfDay(now);
+  const dateKey = new Date((now + IST) * 1000).toISOString().slice(0, 10);
+
+  // 1. Market Open Alert at 09:15 AM IST
+  if (m >= OPEN_MIN && m < OPEN_MIN + 3 && lastOpenAlert !== dateKey) {
+    lastOpenAlert = dateKey;
+    const n = store.NIFTY, b = store.BANKNIFTY;
+    const msg = [
+      '🔔 <b>NSE MARKET IS OPEN (09:15 AM IST)</b>',
+      '━━━━━━━━━━━━━━━━━━━━━',
+      `📈 <b>NIFTY 50</b>: ${n && n.price ? n.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts.`,
+      `🏦 <b>BANK NIFTY</b>: ${b && b.price ? b.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts.`,
+      '',
+      '🎯 TradeX is tracking live tick-by-tick. Have a disciplined trading session!'
+    ].join('\n');
+    sendTelegram(msg).catch(() => {});
+  }
+
+  // 2. Market Close Alert at 03:30 PM IST with index points summary
+  if (m >= CLOSE_MIN && m < CLOSE_MIN + 4 && lastCloseAlert !== dateKey) {
+    lastCloseAlert = dateKey;
+    const n = store.NIFTY, b = store.BANKNIFTY;
+    const nDiff = n && n.price && n.prevClose ? +(n.price - n.prevClose).toFixed(2) : 0;
+    const nPct = n && n.prevClose ? +((nDiff / n.prevClose) * 100).toFixed(2) : 0;
+    const bDiff = b && b.price && b.prevClose ? +(b.price - b.prevClose).toFixed(2) : 0;
+    const bPct = b && b.prevClose ? +((bDiff / b.prevClose) * 100).toFixed(2) : 0;
+
+    const today = dayOf(now);
+    let nLo = Infinity, nHi = -Infinity, bLo = Infinity, bHi = -Infinity;
+    if (n) { for (let i = Math.max(0, n.t.length - 80); i < n.t.length; i++) { if (dayOf(n.t[i]) === today) { if (n.l[i] < nLo) nLo = n.l[i]; if (n.h[i] > nHi) nHi = n.h[i]; } } }
+    if (b) { for (let i = Math.max(0, b.t.length - 80); i < b.t.length; i++) { if (dayOf(b.t[i]) === today) { if (b.l[i] < bLo) bLo = b.l[i]; if (b.h[i] > bHi) bHi = b.h[i]; } } }
+
+    const msg = [
+      '🏁 <b>NSE MARKET CLOSED (03:30 PM IST)</b>',
+      '━━━━━━━━━━━━━━━━━━━━━',
+      `📈 <b>NIFTY 50</b>: ${n && n.price ? n.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts. (${nDiff >= 0 ? '+' : ''}${nDiff.toFixed(2)} Pts. / ${nPct >= 0 ? '+' : ''}${nPct.toFixed(2)}%)`,
+      nLo < Infinity ? `   • Day Range: ${nLo.toLocaleString('en-IN', { minimumFractionDigits: 2 })} – ${nHi.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : '',
+      '',
+      `🏦 <b>BANK NIFTY</b>: ${b && b.price ? b.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts. (${bDiff >= 0 ? '+' : ''}${bDiff.toFixed(2)} Pts. / ${bPct >= 0 ? '+' : ''}${bPct.toFixed(2)}%)`,
+      bLo < Infinity ? `   • Day Range: ${bLo.toLocaleString('en-IN', { minimumFractionDigits: 2 })} – ${bHi.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : '',
+      '━━━━━━━━━━━━━━━━━━━━━',
+      'Trading session ended. Have a great evening!'
+    ].filter(Boolean).join('\n');
+    sendTelegram(msg).catch(() => {});
+  }
+}
+
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const minOfDay = t => Math.floor(((t + IST) % 86400) / 60);
 const dayOf = t => Math.floor((t + IST) / 86400);
@@ -220,6 +362,7 @@ async function pollLoop() {
       catch (e) { S.fails++; S.lastErr = 'Yahoo: ' + e.message; if (S.fails >= 5 && fast) { try { await pollOldSite(sym); } catch (e2) { S.lastErr += ' | history site: ' + e2.message; } } }
     }));
   }
+  checkMarketAlerts();
   pollTimer = setTimeout(pollLoop, fast ? 500 : IDLE_POLL_MS);
 }
 
@@ -262,11 +405,55 @@ function statusOf(sym) {
   const S = store[sym], n = S.t.length, days = new Set(); for (let i = 0; i < n; i++) days.add(dayOf(S.t[i]));
   return { symbol: sym, name: SYMBOLS[sym].name, candles: n, days: days.size, first: n ? S.t[0] : null, last: n ? S.t[n - 1] : null, price: S.price ?? (n ? S.c[n - 1] : null), priceAt: S.priceAt, prevClose: S.prevClose, source: S.source, lastOk: S.lastOk, error: S.lastErr, seeded: S.seeded };
 }
+async function readBody(req, limit = 1048576) {
+  const chunks = []; let size = 0;
+  for await (const ch of req) { size += ch.length; if (size > limit) throw new Error('Body too large'); chunks.push(ch); }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://x'), p = u.pathname;
     if (req.method === 'OPTIONS') return send(req, res, 204, '');
     if (p === '/api/status') return send(req, res, 200, { ok: true, marketOpen: marketOpenNow(), serverTime: Math.floor(Date.now() / 1000), pollMs: POLL_MS, symbols: Object.keys(SYMBOLS).map(statusOf) }, null, { 'Cache-Control': 'no-store' });
+    if (p === '/api/telegram/config') {
+      if (req.method === 'POST') {
+        const body = JSON.parse(await readBody(req));
+        if (body.token !== undefined) telegramConfig.token = String(body.token).trim();
+        if (body.chatId !== undefined) telegramConfig.chatId = String(body.chatId).trim();
+        if (body.enabled !== undefined) telegramConfig.enabled = !!body.enabled;
+        if (body.notifyEntries !== undefined) telegramConfig.notifyEntries = !!body.notifyEntries;
+        if (body.notifyExits !== undefined) telegramConfig.notifyExits = !!body.notifyExits;
+        if (body.notifyMarket !== undefined) telegramConfig.notifyMarket = !!body.notifyMarket;
+        saveTelegramConfig();
+        return send(req, res, 200, { ok: true, config: telegramConfig });
+      }
+      return send(req, res, 200, { ok: true, config: telegramConfig });
+    }
+    if (p === '/api/telegram/detect') {
+      const r = await detectTelegramChatId(u.searchParams.get('token'));
+      return send(req, res, 200, r);
+    }
+    if (p === '/api/telegram/test' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      const text = [
+        '🔔 <b>TRADEX NOTIFICATION TEST</b>',
+        '━━━━━━━━━━━━━━━━━━━━━',
+        '✅ Telegram bot connected successfully!',
+        '📈 Live alerts for BUY / SELL entries, trade exits, and market open/close summaries are active.',
+        `⏰ Time: ${new Date((Date.now() + IST) * 1000).toISOString().slice(11, 19)} IST`
+      ].join('\n');
+      const r = await sendTelegram(text, body.token, body.chatId);
+      return send(req, res, 200, r);
+    }
+    if (p === '/api/telegram/send' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      if (!telegramConfig.enabled) return send(req, res, 200, { ok: false, skipped: 'disabled' });
+      if (body.type === 'entry' && !telegramConfig.notifyEntries) return send(req, res, 200, { ok: false, skipped: 'entries_off' });
+      if (body.type === 'exit' && !telegramConfig.notifyExits) return send(req, res, 200, { ok: false, skipped: 'exits_off' });
+      const r = await sendTelegram(body.text);
+      return send(req, res, 200, r);
+    }
     if (p === '/api/candles') {
       const sym = (u.searchParams.get('symbol') || 'NIFTY').toUpperCase(), tf = +u.searchParams.get('tf') || 5;
       if (!store[sym] || ![5, 15, 30].includes(tf)) return send(req, res, 400, { error: 'Unknown symbol or timeframe' });
