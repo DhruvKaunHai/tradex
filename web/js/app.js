@@ -27,7 +27,7 @@ async function loadData(sym, tf, force) {
   const r = await fetch(`${API}/api/candles?symbol=${sym}&tf=${tf}`); if (!r.ok) throw new Error('The server did not return candles');
   const j = await r.json(); return (A.data[k] = { t: j.t, o: j.o, h: j.h, l: j.l, c: j.c });
 }
-function applyTick(sym, bar) { // bar is a 5 minute candle [t,o,h,l,c]
+function applyTick(sym, bar, livePrice, oldPrice) { // bar is a 5 minute candle [t,o,h,l,c]
   let newBar = false;
   for (const tf of [5, 15, 30]) {
     const d = A.data[key(sym, tf)]; if (!d) continue; const n = d.t.length; let b = bar;
@@ -35,7 +35,7 @@ function applyTick(sym, bar) { // bar is a 5 minute candle [t,o,h,l,c]
       b = n && d.t[n - 1] === t ? [t, d.o[n - 1], Math.max(d.h[n - 1], bar[2]), Math.min(d.l[n - 1], bar[3]), bar[4]] : [t, bar[1], bar[2], bar[3], bar[4]]; }
     if (n && b[0] < d.t[n - 1]) continue;
     const isNew = !n || b[0] > d.t[n - 1];
-    if (sym === A.symbol && tf === A.tf) { chart.updateLast(b); if (isNew) newBar = true; }
+    if (sym === A.symbol && tf === A.tf) { chart.updateLast(b, livePrice, oldPrice); if (isNew) newBar = true; }
     else if (isNew) { d.t.push(b[0]); d.o.push(b[1]); d.h.push(b[2]); d.l.push(b[3]); d.c.push(b[4]); } else { d.o[n - 1] = b[1]; d.h[n - 1] = b[2]; d.l[n - 1] = b[3]; d.c[n - 1] = b[4]; }
   }
   if (newBar) { clearTimeout(applyTick.t); applyTick.t = setTimeout(() => runAll(true), 400); }
@@ -45,7 +45,7 @@ function connect() {
     es = new EventSource(`${API}/api/stream`);
     es.onmessage = e => { const m = JSON.parse(e.data); A.serverOk = true;
       if (m.type === 'hello') { m.symbols.forEach(s => (A.status[s.symbol] = s)); A.marketOpen = m.marketOpen; paintSyms(); if (connect.was) { delete A.data[key(A.symbol, A.tf)]; switchData(true); } connect.was = true; }
-      else if (m.type === 'tick') { const st = A.status[m.s] || (A.status[m.s] = {}), old = st.price; st.price = m.price; st.priceAt = m.at; if (m.prev) st.prevClose = m.prev; A.lastTick = Date.now(); A.marketOpen = true; applyTick(m.s, m.bar); paintSyms(m.s, old); if (m.s === A.symbol) paintLegend(); }
+      else if (m.type === 'tick') { const st = A.status[m.s] || (A.status[m.s] = {}), old = st.price; st.price = m.price; st.priceAt = m.at; if (m.prev) st.prevClose = m.prev; A.lastTick = Date.now(); A.marketOpen = true; applyTick(m.s, m.bar, m.price, old); paintSyms(m.s, old); if (m.s === A.symbol) paintLegend(); }
       else if (m.type === 'ping') A.marketOpen = m.marketOpen;
       else if (m.type === 'reload') { for (const tf of [5, 15, 30]) delete A.data[key(m.s, tf)]; if (m.s === A.symbol) switchData(true); refreshStatus(); }
       paintFeed(); };
