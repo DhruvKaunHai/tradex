@@ -172,11 +172,187 @@ async function runStrat(S, quiet) {
 function pushLayers() { const yb = A.period === 'all' ? null : yearSpan(+A.period); chart.setLayers(A.strats.filter(s => s.layer).map(s => { const L = s.layer; if (!L.allTrades) L.allTrades = L.trades; return Object.assign(L, { visible: s.visible, color: s.color, trades: yb ? L.allTrades.filter(x => x.ref.xt >= yb[0] && x.ref.xt < yb[1]) : L.allTrades }); })); const c = $('#rail .count'); if (c) c.remove(); if (A.strats.length) { const b = document.createElement('i'); b.className = 'count'; b.textContent = A.strats.length; $('#rail [data-v="chart"]').appendChild(b); } }
 async function runAll(quiet) { for (const S of A.strats) await runStrat(S, quiet); }
 function addToChart(scriptId, inputs) { let S = A.strats.find(s => s.scriptId === scriptId); if (!S) { const used = A.strats.map(s => s.color); S = { id: uid(), scriptId, color: PALETTE.find(c => !used.includes(c)) || PALETTE[A.strats.length % PALETTE.length], visible: true, inputs: inputs || {} }; A.strats.push(S); saveOnChart(); } return S; }
+
+let dockTab = 'chart';
+let cloudStrats = [];
+
+async function fetchCloudStrats() {
+  try {
+    const res = await fetch(`${API}/api/cloud-strats`);
+    if (res.ok) {
+      const j = await res.json();
+      if (j && j.strats) cloudStrats = j.strats;
+      const cc = $('#cloudCount');
+      if (cc) cc.textContent = cloudStrats.length;
+      if (dockTab === 'cloud') paintCloudList();
+    }
+  } catch (_) {}
+}
+
+async function deployScriptToCloud(id, name, code, inputs) {
+  const err = Pine.check(code);
+  if (err) return toast(`Error on line ${err.line}: ${err.message}`, true);
+  toast(`Deploying "${name}" to Cloud...`);
+  try {
+    const res = await fetch(`${API}/api/cloud-strats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name, symbol: A.symbol, tf: A.tf, code, inputs: inputs || {} })
+    });
+    const j = await res.json();
+    if (j && j.ok) {
+      toast(`"${name}" deployed to Cloud. Running 24/7.`);
+      fetchCloudStrats();
+    } else {
+      toast(`Failed to deploy: ${(j && j.error) || 'Server error'}`, true);
+    }
+  } catch (e) {
+    toast(`Failed to deploy: ${e.message}`, true);
+  }
+}
+
 function paintDock() {
   const el = $('#stratList');
-  if (!A.strats.length) { el.innerHTML = `<div class="empty" style="padding:20px 8px"><p>No strategy on the chart. Add as many as you like, they all run on the full history.</p><button class="btn primary" data-go="editor">Write or pick a strategy</button></div>`; return; }
-  el.innerHTML = A.strats.map(S => { const M = inPeriod(S).metrics; return `<div class="strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''}" data-id="${S.id}"><i class="dot" style="background:${S.color}"></i><span class="nm" title="${esc(S.name || '')}">${esc(S.name || 'Strategy')}</span><span class="acts"><button data-a="eye" title="${S.visible ? 'Hide' : 'Show'} on chart" aria-label="Show or hide">${S.visible ? '◉' : '○'}</button><button data-a="edit" title="Open in editor" aria-label="Edit">✎</button><button data-a="del" title="Remove from chart" aria-label="Remove">✕</button></span><span class="sub">${S.error ? `<span class="down">Line ${S.error.line || '?'}: ${esc(S.error.message)}</span>` : M ? `<span class="${cls(M.all.pts)}" style="font-weight:800">${M.all.pts >= 0 ? '+' : '−'}${Math.abs(M.all.pts).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts</span><span>${M.all.n} trades</span><span>${M.all.winRate.toFixed(0)}% won</span><span>DD ${M.dd.maxPct.toFixed(1)}%</span><span class="${cls(M.net)}" style="opacity:.75">${sinr(M.net)}</span>` : S.result ? '<span>Indicator, no trades</span>' : '<span>Waiting</span>'}</span></div>`; }).join('');
-  $$('.strat', el).forEach(row => { const S = A.strats.find(s => s.id === row.dataset.id); $$('button', row).forEach(b => (b.onclick = ev => { ev.stopPropagation(); const a = b.dataset.a; if (a === 'eye') { S.visible = !S.visible; } else if (a === 'del') { A.strats = A.strats.filter(x => x !== S); } else { openScript(S.scriptId); go('editor'); return; } saveOnChart(); paintDock(); pushLayers(); paintLegend(); })); row.onclick = () => { if (S.metrics) { A.rep.sid = S.id; go('report'); } }; row.style.cursor = S.metrics ? 'pointer' : 'default'; });
+  if (!A.strats.length) {
+    el.innerHTML = `<div class="empty" style="padding:20px 8px"><p>No strategy on the chart. Add as many as you like, they all run on the full history.</p><button class="btn primary" data-go="editor">Write or pick a strategy</button></div>`;
+  } else {
+    el.innerHTML = A.strats.map(S => {
+      const M = inPeriod(S).metrics;
+      return `<div class="strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''}" data-id="${S.id}">
+        <i class="dot" style="background:${S.color}"></i>
+        <span class="nm" title="${esc(S.name || '')}">${esc(S.name || 'Strategy')}</span>
+        <span class="acts">
+          <button data-a="cloud" title="Deploy to Cloud (runs 24/7 with PC off)" aria-label="Deploy to Cloud">Cloud</button>
+          <button data-a="eye" title="${S.visible ? 'Hide' : 'Show'} on chart" aria-label="Show or hide">${S.visible ? 'Hide' : 'Show'}</button>
+          <button data-a="edit" title="Open in editor" aria-label="Edit">Edit</button>
+          <button data-a="del" title="Remove from chart" aria-label="Remove">Remove</button>
+        </span>
+        <span class="sub">
+          ${S.error ? `<span class="down">Line ${S.error.line || '?'}: ${esc(S.error.message)}</span>` : M ? `<span class="${cls(M.all.pts)}" style="font-weight:800">${M.all.pts >= 0 ? '+' : '−'}${Math.abs(M.all.pts).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts</span><span>${M.all.n} trades</span><span>${M.all.winRate.toFixed(0)}% won</span><span>DD ${M.dd.maxPct.toFixed(1)}%</span><span class="${cls(M.net)}" style="opacity:.75">${sinr(M.net)}</span>` : S.result ? '<span>Indicator, no trades</span>' : '<span>Waiting</span>'}
+        </span>
+      </div>`;
+    }).join('');
+    $$('.strat', el).forEach(row => {
+      const S = A.strats.find(s => s.id === row.dataset.id);
+      $$('button', row).forEach(b => (b.onclick = async ev => {
+        ev.stopPropagation();
+        const a = b.dataset.a;
+        if (a === 'cloud') {
+          const sc = scripts.find(x => x.id === S.scriptId);
+          if (!sc) return toast('Could not find strategy script', true);
+          deployScriptToCloud(S.scriptId, S.name, sc.code, S.inputs);
+          return;
+        }
+        if (a === 'eye') { S.visible = !S.visible; }
+        else if (a === 'del') { A.strats = A.strats.filter(x => x !== S); }
+        else { openScript(S.scriptId); go('editor'); return; }
+        saveOnChart(); paintDock(); pushLayers(); paintLegend();
+      }));
+      row.onclick = () => { if (S.metrics) { A.rep.sid = S.id; go('report'); } };
+      row.style.cursor = S.metrics ? 'pointer' : 'default';
+    });
+  }
+  paintCloudList();
+}
+
+function paintCloudList() {
+  const el = $('#cloudList');
+  if (!el) return;
+  if (!cloudStrats.length) {
+    el.innerHTML = `<div class="empty" style="padding:20px 8px">
+      <p style="margin-bottom:10px;line-height:1.5">No 24/7 cloud strategies active. Any strategy deployed to Cloud sends Telegram alerts 24/7 even when your browser and PC are closed.</p>
+      <button class="btn small primary" id="pushCurToCloud">Deploy Active Strategy to Cloud</button>
+    </div>`;
+    const btn = $('#pushCurToCloud');
+    if (btn) btn.onclick = () => {
+      if (A.strats.length) {
+        const S = A.strats[0], sc = scripts.find(x => x.id === S.scriptId);
+        if (sc) deployScriptToCloud(S.scriptId, S.name, sc.code, S.inputs);
+      } else {
+        go('editor');
+      }
+    };
+    return;
+  }
+  el.innerHTML = cloudStrats.map(cs => {
+    return `<div class="strat ${cs.enabled ? '' : 'off'}" data-cid="${cs.id}">
+      <i class="dot" style="background:${cs.enabled ? 'var(--up)' : 'var(--muted)'}"></i>
+      <span class="nm" title="${esc(cs.name)}">${esc(cs.name)}</span>
+      <span class="acts">
+        <button data-ca="toggle" title="${cs.enabled ? 'Pause' : 'Activate'}">${cs.enabled ? 'Pause' : 'Start'}</button>
+        <button data-ca="del" title="Delete from Cloud" class="down">Delete</button>
+      </span>
+      <span class="sub">
+        <span style="font-weight:600">${esc(cs.symbol || 'NIFTY')} · ${cs.tf || 15}m</span>
+        <span style="color:${cs.enabled ? 'var(--up)' : 'var(--muted)'}">${cs.enabled ? 'Active 24/7' : 'Paused'}</span>
+        ${cs.lastError ? `<span class="down" title="${esc(cs.lastError)}">Error</span>` : ''}
+      </span>
+    </div>`;
+  }).join('') + `<div style="padding:8px 4px"><button class="btn small" style="width:100%" id="deployMoreBtn">+ Deploy From Editor</button></div>`;
+
+  $$('.strat[data-cid]', el).forEach(row => {
+    const cid = row.dataset.cid;
+    const cs = cloudStrats.find(x => x.id === cid);
+    if (!cs) return;
+    $$('button', row).forEach(b => (b.onclick = async ev => {
+      ev.stopPropagation();
+      const ca = b.dataset.ca;
+      if (ca === 'toggle') {
+        try {
+          const res = await fetch(`${API}/api/cloud-strats/toggle`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: cid })
+          });
+          const j = await res.json();
+          if (j && j.ok) {
+            cs.enabled = j.enabled;
+            paintCloudList();
+            toast(cs.enabled ? `"${cs.name}" resumed on Cloud.` : `"${cs.name}" paused on Cloud.`);
+          }
+        } catch (e) { toast('Toggle failed', true); }
+      } else if (ca === 'del') {
+        if (!confirm(`Delete "${cs.name}" from Cloud? It will stop sending alerts when PC is off.`)) return;
+        try {
+          const res = await fetch(`${API}/api/cloud-strats/delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: cid })
+          });
+          const j = await res.json();
+          if (j && j.ok) {
+            cloudStrats = cloudStrats.filter(x => x.id !== cid);
+            const cc = $('#cloudCount'); if (cc) cc.textContent = cloudStrats.length;
+            paintCloudList();
+            toast(`"${cs.name}" removed from Cloud.`);
+          }
+        } catch (e) { toast('Delete failed', true); }
+      }
+    }));
+  });
+  const dm = $('#deployMoreBtn');
+  if (dm) dm.onclick = () => go('editor');
+}
+
+// Wire dock tabs
+const dtChart = $('[data-dock="chart"]');
+const dtCloud = $('[data-dock="cloud"]');
+if (dtChart && dtCloud) {
+  dtChart.onclick = () => {
+    dockTab = 'chart';
+    dtChart.setAttribute('aria-pressed', 'true');
+    dtCloud.setAttribute('aria-pressed', 'false');
+    $('#stratList').classList.remove('hide');
+    $('#cloudList').classList.add('hide');
+  };
+  dtCloud.onclick = () => {
+    dockTab = 'cloud';
+    dtCloud.setAttribute('aria-pressed', 'true');
+    dtChart.setAttribute('aria-pressed', 'false');
+    $('#stratList').classList.add('hide');
+    $('#cloudList').classList.remove('hide');
+    fetchCloudStrats();
+  };
 }
 $('#addStrat').onclick = () => go('editor');
 
@@ -239,6 +415,7 @@ function openScript(id) { curId = id; store.set('cur', id); syncEditor(); }
 function saveCurrent() { const s = cur(); s.code = ta.value; s.name = $('#scriptName').value.trim() || 'Untitled'; s.dirty = false; saveScripts(); paintLib(); toast('Saved'); }
 $('#scriptName').onchange = () => { cur().name = $('#scriptName').value.trim() || 'Untitled'; cur().named = true; saveScripts(); paintLib(); const S = A.strats.find(x => x.scriptId === curId); if (S) { S.name = cur().name; paintDock(); } };
 $('#saveBtn').onclick = saveCurrent; $('#runBtn').onclick = () => runCurrent();
+const cb = $('#cloudBtn'); if (cb) cb.onclick = () => deployScriptToCloud(curId, $('#scriptName').value.trim() || 'Strategy', ta.value, {});
 $('#sideBtn').onclick = () => $('#v-editor').classList.toggle('side');
 $('#openReport').onclick = () => { const S = A.strats.find(x => x.scriptId === curId); if (S) A.rep.sid = S.id; go('report'); };
 $('#showOnChart').onclick = () => go('chart');
@@ -433,14 +610,14 @@ function renderSettings() {
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="font-weight:600;font-size:12px;min-width:90px">Telegram Bot:</span>
         <span style="font-size:12px;color:var(--text);display:inline-flex;align-items:center;gap:6px">
-          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#35d6ae"></span>
+          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#35d6ae"></span>
           <b>@TradeX_terminal_bot</b> <span class="muted">(Secured on Server)</span>
         </span>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <label style="font-weight:600;font-size:12px;min-width:90px">Chat ID:</label>
-        <input type="text" id="tgChatInp" class="inp" style="flex:1;min-width:180px;font-family:monospace;font-size:12px" value="${esc(tgConfig.chatId || '')}" placeholder="Your Chat ID (click Auto-Detect)">
-        <button class="btn small" id="tgDetectBtn" title="Auto-detect Chat ID after tapping Start in Telegram">🔍 Auto-Detect Chat ID</button>
+        <input type="text" id="tgChatInp" class="inp" style="flex:1;min-width:180px;font-family:monospace;font-size:12px" value="${esc(tgConfig.chatId || '1149546127')}" placeholder="Your Chat ID">
+        <button class="btn small" id="tgDetectBtn" title="Auto-detect Chat ID from Telegram">Auto-Detect Chat ID</button>
       </div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin:4px 0">
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="tgEnableInp" ${tgConfig.enabled ? 'checked' : ''}> Enable Notifications</label>
@@ -450,15 +627,15 @@ function renderSettings() {
       </div>
       <div id="tgStatusMsg" style="font-size:12px;min-height:18px;font-weight:500"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-        <button class="btn primary small" id="tgSaveBtn">💾 Save Telegram Settings</button>
-        <button class="btn small" id="tgTestBtn">📲 Send Test Alert</button>
-        <a href="https://t.me/TradeX_terminal_bot" target="_blank" class="btn small" style="text-decoration:none">Open @TradeX_terminal_bot ↗</a>
+        <button class="btn primary small" id="tgSaveBtn">Save Settings</button>
+        <button class="btn small" id="tgTestBtn">Send Test Alert</button>
+        <a href="https://t.me/TradeX_terminal_bot" target="_blank" class="btn small" style="text-decoration:none">Open @TradeX_terminal_bot</a>
       </div>
       <p class="note" style="margin-top:6px;line-height:1.6">
-        <b>Quick 10-Second Setup:</b><br>
+        <b>Quick Setup:</b><br>
         1. Open <a href="https://t.me/TradeX_terminal_bot" target="_blank" style="color:var(--accent)">@TradeX_terminal_bot</a> in Telegram and click <b>Start</b>.<br>
-        2. Click <b>🔍 Auto-Detect Chat ID</b> above. It will automatically retrieve your numeric Chat ID.<br>
-        3. Click <b>📲 Send Test Alert</b> to confirm instant notification delivery!
+        2. Click <b>Auto-Detect Chat ID</b> above to fetch your numeric Chat ID.<br>
+        3. Click <b>Send Test Alert</b> to confirm instant notification delivery.
       </p>
     </div>
   </div>
@@ -473,9 +650,9 @@ function renderSettings() {
     s.style.color = isErr ? 'var(--down)' : isOk ? 'var(--up)' : 'var(--muted)';
   };
   if (tgConfig.chatId) {
-    setTgStatus(`🟢 Connected to Chat ID: <b>${esc(tgConfig.chatId)}</b> (@TradeX_terminal_bot)`, false, true);
+    setTgStatus(`Connected to Chat ID: <b>${esc(tgConfig.chatId)}</b> (@TradeX_terminal_bot)`, false, true);
   } else {
-    setTgStatus('⚠️ Please open @TradeX_terminal_bot in Telegram, tap Start, then click Auto-Detect Chat ID.', false, false);
+    setTgStatus('Please open @TradeX_terminal_bot in Telegram, tap Start, then click Auto-Detect Chat ID.', false, false);
   }
 
   $('#tgSaveBtn').onclick = async () => {
@@ -491,34 +668,34 @@ function renderSettings() {
         body: JSON.stringify(tgConfig)
       });
       const j = await res.json();
-      if (j && j.ok) setTgStatus('✅ Telegram settings saved successfully!', false, true);
-      else setTgStatus(`❌ Failed to save: ${esc(j ? j.error : 'Server error')}`, true);
+      if (j && j.ok) setTgStatus('Telegram settings saved successfully.', false, true);
+      else setTgStatus(`Failed to save: ${esc(j ? j.error : 'Server error')}`, true);
     } catch (e) {
-      setTgStatus(`❌ Failed to save: ${esc(e.message)}`, true);
+      setTgStatus(`Failed to save: ${esc(e.message)}`, true);
     }
   };
 
   $('#tgDetectBtn').onclick = async () => {
-    setTgStatus('🔍 Checking Telegram for your chat ID...', false, false);
+    setTgStatus('Checking Telegram for your chat ID...', false, false);
     try {
       const res = await fetch(`${API}/api/telegram/detect`);
       const j = await res.json();
       if (j && j.ok && j.chatId) {
         tgConfig.chatId = j.chatId;
         $('#tgChatInp').value = j.chatId;
-        setTgStatus(`✅ Detected Chat ID: <b>${esc(j.chatId)}</b>${j.name ? ` (${esc(j.name)})` : ''}! Saved.`, false, true);
+        setTgStatus(`Detected Chat ID: <b>${esc(j.chatId)}</b>${j.name ? ` (${esc(j.name)})` : ''}. Saved.`, false, true);
       } else {
-        setTgStatus(`❌ ${esc((j && j.error) || 'Could not find message. Make sure you opened @TradeX_terminal_bot and tapped Start!')}`, true);
+        setTgStatus(`${esc((j && j.error) || 'Could not find message. Make sure you opened @TradeX_terminal_bot and tapped Start.')}`, true);
       }
     } catch (e) {
-      setTgStatus(`❌ Error detecting chat: ${esc(e.message)}`, true);
+      setTgStatus(`Error detecting chat: ${esc(e.message)}`, true);
     }
   };
 
   $('#tgTestBtn').onclick = async () => {
-    setTgStatus('🚀 Sending test alert to Telegram...', false, false);
+    setTgStatus('Sending test alert to Telegram...', false, false);
     const chatId = $('#tgChatInp').value.trim();
-    if (!chatId) return setTgStatus('❌ Chat ID is empty! Please open @TradeX_terminal_bot, tap Start, then click Auto-Detect first.', true);
+    if (!chatId) return setTgStatus('Chat ID is empty. Please open @TradeX_terminal_bot, tap Start, then click Auto-Detect first.', true);
     try {
       const res = await fetch(`${API}/api/telegram/test`, {
         method: 'POST',
@@ -526,10 +703,10 @@ function renderSettings() {
         body: JSON.stringify({ chatId })
       });
       const j = await res.json();
-      if (j && j.ok) setTgStatus('🎉 Test notification delivered! Check your Telegram.', false, true);
-      else setTgStatus(`❌ Delivery failed: ${esc((j && j.error) || 'Telegram API error')}`, true);
+      if (j && j.ok) setTgStatus('Test notification delivered. Check your Telegram app.', false, true);
+      else setTgStatus(`Delivery failed: ${esc((j && j.error) || 'Telegram API error')}`, true);
     } catch (e) {
-      setTgStatus(`❌ Delivery failed: ${esc(e.message)}`, true);
+      setTgStatus(`Delivery failed: ${esc(e.message)}`, true);
     }
   };
 
@@ -543,6 +720,7 @@ for (const o of store.get('onchart', [])) if (scripts.find(s => s.id === o.scrip
 if (innerWidth < 900) $('#dock').classList.add('closed');
 paintSyms(); paintDock(); pushLayers(); go(location.hash.slice(1) || 'chart'); requestAnimationFrame(paintTf); if (document.fonts && document.fonts.ready) document.fonts.ready.then(paintTf);
 fetchTgConfig();
+fetchCloudStrats();
 refreshStatus().then(() => switchData()); connect(); setInterval(paintFeed, 1000); setInterval(refreshStatus, 30000);
 window.TX = { A, chart };
 })();

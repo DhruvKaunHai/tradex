@@ -30,7 +30,7 @@ for (const s in SYMBOLS) store[s] = { t: [], o: [], h: [], l: [], c: [], ver: 0,
 const TELEGRAM_FILE = path.join(DATA, 'telegram.json');
 let telegramConfig = {
   token: process.env.TELEGRAM_BOT_TOKEN || '9025942462:AAECO53vcE7HPwkR9KcyAlrudmeP1zvqAJo',
-  chatId: process.env.TELEGRAM_CHAT_ID || '',
+  chatId: process.env.TELEGRAM_CHAT_ID || '1149546127',
   enabled: true,
   notifyEntries: true,
   notifyExits: true,
@@ -51,6 +51,15 @@ function saveTelegramConfig() {
   } catch (e) { log('Telegram config save error:', e.message); }
 }
 loadTelegramConfig();
+
+function fmtIST(epochSec) {
+  if (!epochSec) return '';
+  const d = new Date((epochSec + IST) * 1000);
+  let h = d.getUTCHours(), m = d.getUTCMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
+}
 
 async function sendTelegram(text, customToken, customChatId) {
   const token = customToken || telegramConfig.token;
@@ -165,6 +174,149 @@ function checkMarketAlerts() {
       'Trading session ended. Have a great evening!'
     ].filter(Boolean).join('\n');
     sendTelegram(msg).catch(() => {});
+  }
+}
+
+/* ---------- cloud strategies 24/7 runner ---------- */
+const Pine = require(path.join(__dirname, '../web/js/pine.js'));
+const CLOUD_STRATS_FILE = path.join(DATA, 'cloud_strats.json');
+let cloudStrats = [];
+
+function loadCloudStrats() {
+  if (fs.existsSync(CLOUD_STRATS_FILE)) {
+    try {
+      const j = JSON.parse(fs.readFileSync(CLOUD_STRATS_FILE, 'utf8'));
+      if (Array.isArray(j)) cloudStrats = j;
+    } catch (e) { log('Cloud strats read error:', e.message); }
+  }
+}
+function saveCloudStrats() {
+  try {
+    fs.mkdirSync(DATA, { recursive: true });
+    const clean = cloudStrats.map(s => ({
+      id: s.id,
+      name: s.name,
+      symbol: s.symbol || 'NIFTY',
+      tf: s.tf || 15,
+      code: s.code,
+      inputs: s.inputs || {},
+      enabled: s.enabled !== false,
+      createdAt: s.createdAt || Date.now()
+    }));
+    fs.writeFileSync(CLOUD_STRATS_FILE, JSON.stringify(clean, null, 2));
+  } catch (e) { log('Cloud strats save error:', e.message); }
+}
+loadCloudStrats();
+
+function runCloudStrats() {
+  if (!telegramConfig.enabled || !telegramConfig.chatId || !cloudStrats.length) return;
+  for (const cs of cloudStrats) {
+    if (cs.enabled === false || !cs.code) continue;
+    const sym = (cs.symbol || 'NIFTY').toUpperCase();
+    const S = store[sym];
+    if (!S || S.t.length < 50) continue;
+    const tf = cs.tf || 15;
+    const a = aggregate(sym, tf);
+    if (!a || a.t.length < 30) continue;
+
+    const count = Math.min(a.t.length, 1200);
+    const i0 = a.t.length - count;
+    const candleData = {
+      t: a.t.slice(i0),
+      o: a.o.slice(i0),
+      h: a.h.slice(i0),
+      l: a.l.slice(i0),
+      c: a.c.slice(i0)
+    };
+
+    let r;
+    try {
+      r = Pine.run(cs.code, candleData, { tf, symbol: sym, inputs: cs.inputs || {} });
+    } catch (err) {
+      cs.lastError = err.message;
+      continue;
+    }
+    cs.lastError = null;
+    if (!r || !r.trades) continue;
+
+    if (!cs._knownEntries) cs._knownEntries = new Set();
+    if (!cs._knownExits) cs._knownExits = new Set();
+
+    const symName = SYMBOLS[sym] ? SYMBOLS[sym].name : sym;
+    const stratName = cs.name || 'Strategy';
+    const lastBarIdx = candleData.t.length - 1;
+
+    // Initial run: register all existing backtest trades as known (ZERO spam)
+    if (!cs._alertInit) {
+      cs._alertInit = true;
+      for (const t of r.trades) {
+        const ek = `${sym}_${tf}_${t.ei}_${t.et}_${t.dir}`;
+        cs._knownEntries.add(ek);
+        if (!t.open && t.reason !== 'Still open') {
+          const xk = `${sym}_${tf}_${t.xi}_${t.xt}_${t.dir}`;
+          cs._knownExits.add(xk);
+        }
+      }
+      continue;
+    }
+
+    // Live trades: alert on recent entries/exits
+    for (const t of r.trades) {
+      const isRecentEntry = t.ei >= lastBarIdx - 1;
+      const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1;
+
+      // 1. Entry alert
+      const ek = `${sym}_${tf}_${t.ei}_${t.et}_${t.dir}`;
+      if (isRecentEntry && !cs._knownEntries.has(ek)) {
+        cs._knownEntries.add(ek);
+        if (telegramConfig.notifyEntries) {
+          const action = t.dir > 0 ? 'BUY' : 'SELL';
+          const icon = t.dir > 0 ? '🟢' : '🔴';
+          const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          const timeStr = fmtIST(t.et || candleData.t[t.ei] || Math.floor(Date.now() / 1000));
+
+          const msg = [
+            `${icon} <b>NEW TRADE EXECUTED</b>`,
+            '━━━━━━━━━━━━━━━━━━━━━',
+            `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
+            `🎯 <b>Action</b>: ${action} @ ${epStr} Pts.`,
+            `🧠 <b>Strategy</b>: ${stratName}`,
+            `⏰ <b>Time</b>: ${timeStr} IST`
+          ].join('\n');
+
+          sendTelegram(msg).catch(() => {});
+        }
+      }
+
+      // 2. Exit alert
+      const xk = `${sym}_${tf}_${t.xi}_${t.xt}_${t.dir}`;
+      if (isRecentExit && !cs._knownExits.has(xk)) {
+        cs._knownExits.add(xk);
+        if (telegramConfig.notifyExits) {
+          const pts = t.pts != null ? t.pts : (t.xp - t.ep) * t.dir;
+          const isWin = pts >= 0;
+          const ptsSign = isWin ? '+' : '−';
+          const ptsAbs = Math.abs(pts).toFixed(2);
+          const xpStr = t.xp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          const timeStr = fmtIST(t.xt || candleData.t[t.xi] || Math.floor(Date.now() / 1000));
+          const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
+          const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
+
+          const msg = [
+            '🏁 <b>TRADE COMPLETED</b>',
+            '━━━━━━━━━━━━━━━━━━━━━',
+            `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
+            `🎯 <b>Action</b>: EXIT ${t.dir > 0 ? 'BUY' : 'SELL'}${reason}`,
+            `💰 <b>Exit Price</b>: ${xpStr} Pts.`,
+            `📊 <b>Result</b>: ${resPill}`,
+            `🧠 <b>Strategy</b>: ${stratName}`,
+            `⏰ <b>Time</b>: ${timeStr} IST`
+          ].join('\n');
+
+          sendTelegram(msg).catch(() => {});
+        }
+      }
+    }
   }
 }
 
@@ -363,6 +515,7 @@ async function pollLoop() {
     }));
   }
   checkMarketAlerts();
+  runCloudStrats();
   pollTimer = setTimeout(pollLoop, fast ? 500 : IDLE_POLL_MS);
 }
 
@@ -459,6 +612,53 @@ const server = http.createServer(async (req, res) => {
       if (body.type === 'exit' && !telegramConfig.notifyExits) return send(req, res, 200, { ok: false, skipped: 'exits_off' });
       const r = await sendTelegram(body.text);
       return send(req, res, 200, r);
+    }
+    if (p === '/api/cloud-strats') {
+      if (req.method === 'POST') {
+        const body = JSON.parse(await readBody(req));
+        if (!body.code) return send(req, res, 400, { error: 'Pine code is required' });
+        const chk = Pine.check(body.code);
+        if (chk) return send(req, res, 400, { error: chk.message, line: chk.line });
+        const id = body.id || ('cs_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+        const idx = cloudStrats.findIndex(s => s.id === id);
+        const item = {
+          id,
+          name: String(body.name || 'Cloud Strategy').trim(),
+          symbol: String(body.symbol || 'NIFTY').toUpperCase(),
+          tf: +body.tf || 15,
+          code: String(body.code),
+          inputs: body.inputs || {},
+          enabled: body.enabled !== false,
+          createdAt: body.createdAt || Date.now()
+        };
+        if (idx >= 0) {
+          item._knownEntries = cloudStrats[idx]._knownEntries;
+          item._knownExits = cloudStrats[idx]._knownExits;
+          item._alertInit = cloudStrats[idx]._alertInit;
+          cloudStrats[idx] = item;
+        } else {
+          cloudStrats.push(item);
+        }
+        saveCloudStrats();
+        runCloudStrats();
+        return send(req, res, 200, { ok: true, strat: { id: item.id, name: item.name, symbol: item.symbol, tf: item.tf, enabled: item.enabled } });
+      }
+      return send(req, res, 200, { ok: true, strats: cloudStrats.map(s => ({ id: s.id, name: s.name, symbol: s.symbol, tf: s.tf, inputs: s.inputs, enabled: s.enabled !== false, createdAt: s.createdAt, lastError: s.lastError })) });
+    }
+    if (p === '/api/cloud-strats/delete' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      cloudStrats = cloudStrats.filter(s => s.id !== body.id);
+      saveCloudStrats();
+      return send(req, res, 200, { ok: true });
+    }
+    if (p === '/api/cloud-strats/toggle' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      const s = cloudStrats.find(x => x.id === body.id);
+      if (s) {
+        s.enabled = body.enabled !== undefined ? !!body.enabled : !s.enabled;
+        saveCloudStrats();
+      }
+      return send(req, res, 200, { ok: true, enabled: s ? s.enabled : false });
     }
     if (p === '/api/candles') {
       const sym = (u.searchParams.get('symbol') || 'NIFTY').toUpperCase(), tf = +u.searchParams.get('tf') || 5;

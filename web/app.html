@@ -42,8 +42,15 @@
         <div id="tradeCard"></div>
       </div>
       <aside class="dock" id="dock">
-        <header><h2>On this chart</h2><button class="btn small primary" id="addStrat">Add</button></header>
+        <header>
+          <div class="seg" id="dockTabs" style="display:inline-flex">
+            <button data-dock="chart" aria-pressed="true">Chart</button>
+            <button data-dock="cloud" aria-pressed="false">Cloud <span id="cloudCount" style="opacity:0.75;font-size:10px;margin-left:3px">0</span></button>
+          </div>
+          <button class="btn small primary" id="addStrat">Add</button>
+        </header>
         <div class="list scroll" id="stratList"></div>
+        <div class="list scroll hide" id="cloudList"></div>
       </aside>
     </section>
 
@@ -54,6 +61,7 @@
           <button class="btn small" id="sideBtn">Library</button>
           <button class="btn small" id="saveBtn" title="Ctrl+S">Save</button>
           <button class="btn primary" id="runBtn" title="Ctrl+Enter">Run backtest</button>
+          <button class="btn small" id="cloudBtn" title="Deploy to Cloud (runs 24/7 with PC off)">Deploy to Cloud</button>
         </div>
         <div class="code"><div class="gutter" id="gutter"></div><div class="stack"><div class="errline hide" id="errLine"></div><pre id="hl" aria-hidden="true"></pre><textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Pine code"></textarea></div></div>
         <div class="quick hide" id="quick"></div>
