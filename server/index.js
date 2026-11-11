@@ -28,9 +28,14 @@ for (const s in SYMBOLS) store[s] = { t: [], o: [], h: [], l: [], c: [], ver: 0,
 
 /* ---------- telegram alerts ---------- */
 const TELEGRAM_FILE = path.join(DATA, 'telegram.json');
+const OWNER_CHAT_IDS = (process.env.TELEGRAM_CHAT_ID || '1149546127')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
 let telegramConfig = {
   token: process.env.TELEGRAM_BOT_TOKEN || '',
-  chatId: process.env.TELEGRAM_CHAT_ID || '1149546127',
+  extraChatIds: [],
   enabled: true,
   notifyEntries: true,
   notifyExits: true,
@@ -40,9 +45,24 @@ function loadTelegramConfig() {
   if (fs.existsSync(TELEGRAM_FILE)) {
     try {
       const j = JSON.parse(fs.readFileSync(TELEGRAM_FILE, 'utf8'));
-      telegramConfig = Object.assign(telegramConfig, j);
+      if (j.token) telegramConfig.token = j.token;
+      if (Array.isArray(j.extraChatIds)) telegramConfig.extraChatIds = j.extraChatIds;
+      if (j.enabled !== undefined) telegramConfig.enabled = !!j.enabled;
+      if (j.notifyEntries !== undefined) telegramConfig.notifyEntries = !!j.notifyEntries;
+      if (j.notifyExits !== undefined) telegramConfig.notifyExits = !!j.notifyExits;
+      if (j.notifyMarket !== undefined) telegramConfig.notifyMarket = !!j.notifyMarket;
     } catch (e) { log('Telegram config read error:', e.message); }
   }
+}
+function getRecipientChatIds() {
+  const ids = new Set(OWNER_CHAT_IDS);
+  if (Array.isArray(telegramConfig.extraChatIds)) {
+    for (const id of telegramConfig.extraChatIds) {
+      const clean = String(id || '').trim();
+      if (clean && /^-?\d+$/.test(clean)) ids.add(clean);
+    }
+  }
+  return [...ids];
 }
 function saveTelegramConfig() {
   try {
@@ -93,20 +113,7 @@ function fmtIST(epochSec) {
 let lastSentHash = '';
 let lastSentTime = 0;
 
-async function sendTelegram(text, customToken, customChatId) {
-  const token = customToken || telegramConfig.token;
-  const chatId = customChatId || telegramConfig.chatId;
-  if (!token || !chatId) return { ok: false, error: 'Bot token or Chat ID is missing' };
-
-  // Safety net throttle: never deliver identical text within 45 seconds
-  const h = String(text || '').trim();
-  const now = Date.now();
-  if (h && h === lastSentHash && now - lastSentTime < 45000) {
-    return { ok: true, skipped: 'duplicate_throttle' };
-  }
-  lastSentHash = h;
-  lastSentTime = now;
-
+function sendTelegramSingle(token, chatId, text) {
   const postData = JSON.stringify({
     chat_id: chatId,
     text: text,
@@ -139,6 +146,28 @@ async function sendTelegram(text, customToken, customChatId) {
   });
 }
 
+async function sendTelegram(text, customToken, customChatId) {
+  const token = customToken || telegramConfig.token;
+  const targets = customChatId
+    ? String(customChatId).split(',').map(s => s.trim()).filter(s => /^-?\d+$/.test(s))
+    : getRecipientChatIds();
+  if (!token || !targets.length) return { ok: false, error: 'Bot token or Chat ID is missing' };
+
+  // Safety net throttle: never deliver identical text within 45 seconds
+  const h = String(text || '').trim();
+  const now = Date.now();
+  if (h && h === lastSentHash && now - lastSentTime < 45000) {
+    return { ok: true, skipped: 'duplicate_throttle' };
+  }
+  lastSentHash = h;
+  lastSentTime = now;
+
+  const results = await Promise.all(targets.map(cid => sendTelegramSingle(token, cid, text)));
+  const firstOk = results.find(r => r.ok);
+  if (firstOk) return { ok: true, result: firstOk.result, results };
+  return results[0] || { ok: false, error: 'Failed to send' };
+}
+
 async function detectTelegramChatId(customToken) {
   const token = customToken || telegramConfig.token;
   if (!token) return { ok: false, error: 'Bot token is missing' };
@@ -154,8 +183,6 @@ async function detectTelegramChatId(customToken) {
             const m = updates[i].message || updates[i].channel_post;
             if (m && m.chat && m.chat.id) {
               const detected = String(m.chat.id);
-              telegramConfig.chatId = detected;
-              saveTelegramConfig();
               return ok({ ok: true, chatId: detected, name: m.from ? `${m.from.first_name || ''} ${m.from.last_name || ''}`.trim() : '' });
             }
           }
@@ -168,7 +195,7 @@ async function detectTelegramChatId(customToken) {
 
 let lastOpenAlert = '', lastCloseAlert = '';
 function checkMarketAlerts() {
-  if (!telegramConfig.enabled || !telegramConfig.notifyMarket || !telegramConfig.chatId) return;
+  if (!telegramConfig.enabled || !telegramConfig.notifyMarket || !getRecipientChatIds().length) return;
   const now = Date.now() / 1000;
   const wd = new Date((now + IST) * 1000).getUTCDay();
   if (wd < 1 || wd > 5) return;
@@ -300,7 +327,7 @@ function queueGitHubSync() {
 loadCloudStrats();
 
 function runCloudStrats() {
-  if (!telegramConfig.enabled || !telegramConfig.chatId || !cloudStrats.length) return;
+  if (!telegramConfig.enabled || !getRecipientChatIds().length || !cloudStrats.length) return;
   for (const cs of cloudStrats) {
     if (cs.enabled === false || !cs.code) continue;
     const sym = (cs.symbol || 'NIFTY').toUpperCase();
@@ -670,18 +697,34 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') return send(req, res, 204, '');
     if (p === '/api/status') return send(req, res, 200, { ok: true, marketOpen: marketOpenNow(), serverTime: Math.floor(Date.now() / 1000), pollMs: POLL_MS, symbols: Object.keys(SYMBOLS).map(statusOf) }, null, { 'Cache-Control': 'no-store' });
     if (p === '/api/telegram/config') {
+      const publicConfig = () => ({
+        ownerActive: OWNER_CHAT_IDS.length > 0,
+        extraChatIds: telegramConfig.extraChatIds || [],
+        enabled: telegramConfig.enabled,
+        notifyEntries: telegramConfig.notifyEntries,
+        notifyExits: telegramConfig.notifyExits,
+        notifyMarket: telegramConfig.notifyMarket,
+        configured: !!telegramConfig.token
+      });
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
         if (body.token) telegramConfig.token = String(body.token).trim();
-        if (body.chatId !== undefined) telegramConfig.chatId = String(body.chatId).trim();
+        if (body.extraChatIds !== undefined) {
+          const raw = Array.isArray(body.extraChatIds)
+            ? body.extraChatIds
+            : String(body.extraChatIds || '').split(',');
+          telegramConfig.extraChatIds = [...new Set(
+            raw.map(s => String(s || '').trim()).filter(s => /^-?\d+$/.test(s) && !OWNER_CHAT_IDS.includes(s))
+          )];
+        }
         if (body.enabled !== undefined) telegramConfig.enabled = !!body.enabled;
         if (body.notifyEntries !== undefined) telegramConfig.notifyEntries = !!body.notifyEntries;
         if (body.notifyExits !== undefined) telegramConfig.notifyExits = !!body.notifyExits;
         if (body.notifyMarket !== undefined) telegramConfig.notifyMarket = !!body.notifyMarket;
         saveTelegramConfig();
-        return send(req, res, 200, { ok: true, config: { chatId: telegramConfig.chatId, enabled: telegramConfig.enabled, notifyEntries: telegramConfig.notifyEntries, notifyExits: telegramConfig.notifyExits, notifyMarket: telegramConfig.notifyMarket, configured: !!telegramConfig.token } });
+        return send(req, res, 200, { ok: true, config: publicConfig() });
       }
-      return send(req, res, 200, { ok: true, config: { chatId: telegramConfig.chatId, enabled: telegramConfig.enabled, notifyEntries: telegramConfig.notifyEntries, notifyExits: telegramConfig.notifyExits, notifyMarket: telegramConfig.notifyMarket, configured: !!telegramConfig.token } });
+      return send(req, res, 200, { ok: true, config: publicConfig() });
     }
     if (p === '/api/telegram/detect') {
       const r = await detectTelegramChatId();
@@ -689,7 +732,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/telegram/test' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req));
-      const targetChat = body.chatId || telegramConfig.chatId;
+      const targetChat = body.chatId ? String(body.chatId).trim() : null;
       const d = new Date(Date.now() + IST * 1000);
       let h = d.getUTCHours(), m = d.getUTCMinutes();
       const ap = h >= 12 ? 'PM' : 'AM';
