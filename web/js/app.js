@@ -930,7 +930,7 @@ function fmtIST(epochSec) {
 }
 
 function watchTradeAlerts(S, trades, data, sym, tf) {
-  if (!tgConfig.enabled || !tgConfig.chatId) return;
+  if (!tgConfig.enabled || (!tgConfig.ownerActive && !(tgConfig.extraChatIds && tgConfig.extraChatIds.length))) return;
   if (!trades || !trades.length || !data || !data.t.length) return;
 
   if (!S._knownEntries) S._knownEntries = new Set();

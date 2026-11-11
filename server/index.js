@@ -183,10 +183,11 @@ async function detectTelegramChatId(customToken) {
             const m = updates[i].message || updates[i].channel_post;
             if (m && m.chat && m.chat.id) {
               const detected = String(m.chat.id);
+              if (OWNER_CHAT_IDS.includes(detected)) continue;
               return ok({ ok: true, chatId: detected, name: m.from ? `${m.from.first_name || ''} ${m.from.last_name || ''}`.trim() : '' });
             }
           }
-          return ok({ ok: false, error: 'No messages found yet. Please open @TradeX_terminal_bot in Telegram and tap Start!' });
+          return ok({ ok: false, error: 'No friend messages found yet. Ask your friend to open @TradeX_terminal_bot in Telegram and tap Start!' });
         } catch (e) { ok({ ok: false, error: e.message }); }
       });
     }).on('error', e => ok({ ok: false, error: e.message }));
