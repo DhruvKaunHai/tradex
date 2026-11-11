@@ -393,7 +393,7 @@ class TXChart {
     }
   }
   paintTrades(L, i0, i1, y) {
-    const c = this.ctx, d = this.d, bw = this.bw, col = this.col, tr = L.trades, ink = document.documentElement.dataset.theme === 'light' ? '#ffffff' : '#0d0b12'; let lo = 0, hi = tr.length;
+    const c = this.ctx, d = this.d, bw = this.bw, pw = this.pw, mainH = this.mainH, col = this.col, tr = L.trades, ink = document.documentElement.dataset.theme === 'light' ? '#ffffff' : '#0d0b12'; let lo = 0, hi = tr.length;
     while (lo < hi) { const m = (lo + hi) >> 1; if (tr[m].xi < i0) lo = m + 1; else hi = m; }
     const money = v => { const a = Math.abs(v); return (v >= 0 ? '+' : '−') + '₹' + (a >= 1e5 ? (a / 1e5).toFixed(2) + 'L' : a >= 1e3 ? (a / 1e3).toFixed(1) + 'k' : a.toFixed(0)); };
     const pill = (x, yy, txt, bg, fg, align) => { c.font = `700 10px ${col.font}`; const w = c.measureText(txt).width + 10, h = 16, px = align === 'l' ? x : align === 'r' ? x - w : x - w / 2; c.fillStyle = bg; c.beginPath(); c.roundRect(px, yy - h / 2, w, h, 4); c.fill(); c.fillStyle = fg; c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillText(txt, px + 5, yy + 0.5); return px + w / 2; };
@@ -425,6 +425,58 @@ class TXChart {
         c.strokeStyle = rc; c.beginPath(); c.moveTo(x2 - Math.max(bw * 0.6, Math.min(x2 - x1, 40)), y2); c.lineTo(x2 + bw * 0.6, y2); c.stroke();
       }
 
+      // Target (TP) & Stop Loss (SL) lines for trade: simple, subtle dashed lines bounded strictly to trade duration
+      let tpVal = t.tp != null ? t.tp : (t.ref && t.ref.tp != null ? t.ref.tp : null);
+      let slVal = t.sl != null ? t.sl : (t.ref && t.ref.sl != null ? t.ref.sl : null);
+      if (tpVal == null && slVal == null && isExited) {
+        if (win) {
+          tpVal = t.xp;
+          if (t.mae > 0) slVal = long ? t.ep - t.mae : t.ep + t.mae;
+        } else {
+          slVal = t.xp;
+          if (t.mfe > 0) tpVal = long ? t.ep + t.mfe : t.ep - t.mfe;
+        }
+      }
+
+      const xSpanEnd = isOpen ? Math.max(x2, x1 + bw * 2) : Math.max(x2, x1 + bw * 0.8);
+      const xEnd = Math.max(x1 + Math.max(bw * 0.8, 14), xSpanEnd);
+
+      if (tpVal != null) {
+        const yTp = y(tpVal);
+        if (Number.isFinite(yTp) && yTp >= -20 && yTp <= mainH + 20) {
+          c.strokeStyle = col.up; c.lineWidth = 1.1; c.globalAlpha = 0.65; c.setLineDash([3, 3]);
+          c.beginPath(); c.moveTo(x1, yTp); c.lineTo(xEnd, yTp); c.stroke(); c.setLineDash([]); c.globalAlpha = 1;
+          if (bw >= 3.8) {
+            c.font = `700 9px ${col.font}`;
+            const txt = bw >= 5.5 ? 'TP ' + tpVal.toLocaleString('en-IN', { maximumFractionDigits: 1 }) : 'TP';
+            const tw = c.measureText(txt).width + 6;
+            const bx = (xEnd + 2 + tw > pw - 4) ? Math.max(x1 + 2, xEnd - tw - 2) : xEnd + 2;
+            c.fillStyle = col.up; c.globalAlpha = 0.85;
+            c.beginPath(); c.roundRect(bx, yTp - 6.5, tw, 13, 2.5); c.fill();
+            c.fillStyle = '#ffffff'; c.globalAlpha = 1;
+            c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillText(txt, bx + 3, yTp + 0.5);
+          }
+        }
+      }
+
+      if (slVal != null) {
+        const ySl = y(slVal);
+        if (Number.isFinite(ySl) && ySl >= -20 && ySl <= mainH + 20) {
+          c.strokeStyle = col.down; c.lineWidth = 1.1; c.globalAlpha = 0.65; c.setLineDash([3, 3]);
+          c.beginPath(); c.moveTo(x1, ySl); c.lineTo(xEnd, ySl); c.stroke(); c.setLineDash([]); c.globalAlpha = 1;
+          if (bw >= 3.8) {
+            c.font = `700 9px ${col.font}`;
+            const txt = bw >= 5.5 ? 'SL ' + slVal.toLocaleString('en-IN', { maximumFractionDigits: 1 }) : 'SL';
+            const tw = c.measureText(txt).width + 6;
+            const bx = (xEnd + 2 + tw > pw - 4) ? Math.max(x1 + 2, xEnd - tw - 2) : xEnd + 2;
+            c.fillStyle = col.down; c.globalAlpha = 0.85;
+            c.beginPath(); c.roundRect(bx, ySl - 6.5, tw, 13, 2.5); c.fill();
+            c.fillStyle = '#ffffff'; c.globalAlpha = 1;
+            c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillText(txt, bx + 3, ySl + 0.5);
+          }
+        }
+      }
+
       // entry arrow: yellow if ongoing, blue if completed
       const ey = long ? y(d.l[t.ei]) + 6 : y(d.h[t.ei]) - 6;
       c.fillStyle = boxCol; c.beginPath(); if (long) { c.moveTo(x1, ey); c.lineTo(x1 - 6, ey + 9); c.lineTo(x1 + 6, ey + 9); } else { c.moveTo(x1, ey); c.lineTo(x1 - 6, ey - 9); c.lineTo(x1 + 6, ey - 9); } c.fill();
@@ -440,14 +492,16 @@ class TXChart {
         c.strokeStyle = col.text; c.lineWidth = 1.5; c.fillStyle = rc; c.beginPath(); c.arc(x2, y2, 4.5, 0, 7); c.fill(); c.stroke();
         const ly = y2;
         if (bw >= 5) {
-          const ptxt = `${t.pts >= 0 ? '+' : '−'}${Math.abs(t.pts).toFixed(1)} pts`; c.font = `800 12px ${col.font}`; const pw = c.measureText(ptxt).width + 12, ph = 20, ppx = x2 + 9;
-          c.fillStyle = rc; c.beginPath(); c.roundRect(ppx, ly - ph / 2, pw, ph, 5); c.fill(); c.fillStyle = ink; c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillText(ptxt, ppx + 6, ly + 0.5);
-          c.font = `500 10px ${col.font}`; c.globalAlpha = 0.75; c.fillStyle = col.text; c.fillText(money(t.pnl), ppx + pw + 5, ly + 0.5); c.globalAlpha = 1;
+          const ptxt = `${t.pts >= 0 ? '+' : '−'}${Math.abs(t.pts).toFixed(1)} pts`; c.font = `800 12px ${col.font}`; const pillW = c.measureText(ptxt).width + 12, ph = 20, ppx = x2 + 9;
+          c.fillStyle = rc; c.beginPath(); c.roundRect(ppx, ly - ph / 2, pillW, ph, 5); c.fill(); c.fillStyle = ink; c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillText(ptxt, ppx + 6, ly + 0.5);
+          c.font = `500 10px ${col.font}`; c.globalAlpha = 0.75; c.fillStyle = col.text; c.fillText(money(t.pnl), ppx + pillW + 5, ly + 0.5); c.globalAlpha = 1;
         }
         else if (bw >= 3.5) { c.font = `600 10px ${col.font}`; c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillStyle = rc; c.fillText((t.pts >= 0 ? '+' : '') + t.pts.toFixed(0), x2 + 7, ly); }
       }
       this.hit.push({ x: x1, y: ey + (long ? 5 : -5), trade: t, layer: L }, { x: x1, y: py, trade: t, layer: L });
       if (isExited) this.hit.push({ x: x2, y: y2, trade: t, layer: L }, { x: x2 + 30, y: y2, trade: t, layer: L });
+      if (tpVal != null) this.hit.push({ x: xEnd, y: y(tpVal), trade: t, layer: L });
+      if (slVal != null) this.hit.push({ x: xEnd, y: y(slVal), trade: t, layer: L });
     }
     c.restore();
   }

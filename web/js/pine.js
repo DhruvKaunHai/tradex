@@ -369,6 +369,12 @@ class Broker {
     e.key = e.id + '|' + (e.from || '');
     if (e.profit === null && e.loss === null && e.limit === null && e.stop === null && e.trailPoints === null && e.trailPrice === null) return;
     this.exits.set(e.key, e);
+    for (const l of this.lots) {
+      if (e.from && e.from !== l.id) continue;
+      const lv = this.levels(l, e);
+      if (lv.stop !== null) l.sl = lv.stop;
+      if (lv.limit !== null) l.tp = lv.limit;
+    }
   }
   cancel(id) { this.orders.delete('E:' + id); for (const [k, e] of this.exits) if (e.id === String(id)) this.exits.delete(k); }
   cancelAll() { this.orders.clear(); this.exits.clear(); }
@@ -379,7 +385,14 @@ class Broker {
     if (cur !== 0 && Math.sign(cur) !== o.dir) this.closeLots(() => true, px, i, 'Reversed by ' + (o.comment || o.id), null, slipIt);
     else if (cur !== 0) { const maxE = Math.max(1, this.cfg.pyramiding); if (this.lots.length >= maxE) return; }
     const fp = slipIt ? this.slip(px, o.dir) : px; const qty = o.qty ?? this.defQty(fp); if (!(qty > 0)) return;
-    this.lots.push({ id: o.id, dir: o.dir, qty, qty0: qty, price: fp, i, comment: o.comment, hi: fp, lo: fp, comm: this.comm(fp, qty), done: {}, tr: {} });
+    const lot = { id: o.id, dir: o.dir, qty, qty0: qty, price: fp, i, comment: o.comment, hi: fp, lo: fp, comm: this.comm(fp, qty), done: {}, tr: {}, sl: null, tp: null };
+    for (const [, e] of this.exits) {
+      if (e.from && e.from !== lot.id) continue;
+      const lv = this.levels(lot, e);
+      if (lv.stop !== null && lot.sl == null) lot.sl = lv.stop;
+      if (lv.limit !== null && lot.tp == null) lot.tp = lv.limit;
+    }
+    this.lots.push(lot);
   }
   closeLots(match, px, i, reason, qtyLimit, slipIt) {
     let left = qtyLimit == null ? Infinity : qtyLimit; const R = this.R, ids = new Set();
@@ -388,7 +401,7 @@ class Broker {
       const q = Math.min(l.qty, left), fp = slipIt ? this.slip(px, -l.dir) : px, cIn = l.comm * q / l.qty, cOut = this.comm(fp, q);
       const pnl = (fp - l.price) * l.dir * q - cIn - cOut;
       l.hi = Math.max(l.hi, fp); l.lo = Math.min(l.lo, fp);
-      this.closed.push({ n: this.closed.length + 1, id: l.id, dir: l.dir, qty: q, ei: l.i, et: R.t[l.i], ep: l.price, xi: i, xt: R.t[i], xp: fp, pnl, pct: (fp - l.price) * l.dir / l.price * 100, pts: (fp - l.price) * l.dir, mfe: (l.dir > 0 ? l.hi - l.price : l.price - l.lo), mae: (l.dir > 0 ? l.price - l.lo : l.hi - l.price), bars: i - l.i, comm: cIn + cOut, reason: reason || '', ec: l.comment || l.id });
+      this.closed.push({ n: this.closed.length + 1, id: l.id, dir: l.dir, qty: q, ei: l.i, et: R.t[l.i], ep: l.price, xi: i, xt: R.t[i], xp: fp, pnl, pct: (fp - l.price) * l.dir / l.price * 100, pts: (fp - l.price) * l.dir, mfe: (l.dir > 0 ? l.hi - l.price : l.price - l.lo), mae: (l.dir > 0 ? l.price - l.lo : l.hi - l.price), bars: i - l.i, comm: cIn + cOut, reason: reason || '', ec: l.comment || l.id, sl: l.sl != null ? l.sl : null, tp: l.tp != null ? l.tp : null });
       ids.add(l.id); this.realized += pnl; if (pnl > 0) { this.gp += pnl; this.wins++; } else if (pnl < 0) { this.gl -= pnl; this.losses++; }
       l.comm -= cIn; l.qty -= q; left -= q;
       if (l.qty <= 1e-9) { this.lots.splice(k, 1); k--; }
@@ -428,6 +441,8 @@ class Broker {
     for (const l of this.lots) for (const [key, e] of this.exits) {
       if (l.done[key] || (e.from && e.from !== l.id)) continue;
       const lv = this.levels(l, e);
+      if (lv.stop !== null && lv.stop !== undefined) l.sl = lv.stop;
+      if (lv.limit !== null && lv.limit !== undefined) l.tp = lv.limit;
       const fire = (why, slipIt) => px => { l.done[key] = 1; e.used = 1; let lim = null; if (e.qty !== null) lim = e.qty; else if (e.pct !== null) lim = l.qty0 * e.pct / 100; this.closeLots(x => x === l, px, this.R.i, why || e.comment || e.id, lim, slipIt); };
       cand(lv.stop, -l.dir, fire(e.cl, true));
       cand(lv.limit, l.dir, fire(e.cp, false));
@@ -790,7 +805,7 @@ function run(src, data, opt) {
     }
   } catch (e) { if (e instanceof PineError) { if (!e.line) e.line = R.line; throw e; } throw new PineError(e.message + ' (while running)', R.line); }
   const trades = B.closed.slice(); const last = n - 1;
-  for (const l of B.lots) { const px = R.c[last]; trades.push({ n: trades.length + 1, id: l.id, dir: l.dir, qty: l.qty, ei: l.i, et: R.t[l.i], ep: l.price, xi: last, xt: R.t[last], xp: px, pnl: (px - l.price) * l.dir * l.qty - l.comm, pct: (px - l.price) * l.dir / l.price * 100, pts: (px - l.price) * l.dir, mfe: l.dir > 0 ? l.hi - l.price : l.price - l.lo, mae: l.dir > 0 ? l.price - l.lo : l.hi - l.price, bars: last - l.i, comm: l.comm, reason: 'Still open', ec: l.comment || l.id, open: true }); }
+  for (const l of B.lots) { const px = R.c[last]; trades.push({ n: trades.length + 1, id: l.id, dir: l.dir, qty: l.qty, ei: l.i, et: R.t[l.i], ep: l.price, xi: last, xt: R.t[last], xp: px, pnl: (px - l.price) * l.dir * l.qty - l.comm, pct: (px - l.price) * l.dir / l.price * 100, pts: (px - l.price) * l.dir, mfe: l.dir > 0 ? l.hi - l.price : l.price - l.lo, mae: l.dir > 0 ? l.price - l.lo : l.hi - l.price, bars: last - l.i, comm: l.comm, reason: 'Still open', ec: l.comment || l.id, open: true, sl: l.sl != null ? l.sl : null, tp: l.tp != null ? l.tp : null }); }
   return { meta: R.meta, isStrategy: R.meta.kind === 'strategy', capital: B.cfg.capital, cfg: B.cfg, trades, equity: B.eq, plots: R.plots, shapes: R.shapes, hlines: R.hlines, bg: R.bg, inputs: R.inputs, warnings: R.warnings };
 }
 function check(src) { try { parse(src); return null; } catch (e) { return { message: e.message, line: e.line || 0 }; } }
