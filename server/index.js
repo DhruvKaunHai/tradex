@@ -52,6 +52,35 @@ function saveTelegramConfig() {
 }
 loadTelegramConfig();
 
+/* ---------- persistent alert deduplication ---------- */
+const ALERTS_FILE = path.join(DATA, 'sent_alerts.json');
+let sentAlerts = new Set();
+function loadSentAlerts() {
+  if (fs.existsSync(ALERTS_FILE)) {
+    try {
+      const arr = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
+      if (Array.isArray(arr)) sentAlerts = new Set(arr);
+    } catch (e) { log('Sent alerts read error:', e.message); }
+  }
+}
+function saveSentAlerts() {
+  try {
+    fs.mkdirSync(DATA, { recursive: true });
+    const arr = [...sentAlerts].slice(-2500);
+    fs.writeFileSync(ALERTS_FILE, JSON.stringify(arr, null, 2));
+  } catch (e) { log('Sent alerts save error:', e.message); }
+}
+loadSentAlerts();
+
+function isAlertSent(key) {
+  return !!key && sentAlerts.has(key);
+}
+function recordSentAlert(key) {
+  if (!key) return;
+  sentAlerts.add(key);
+  saveSentAlerts();
+}
+
 function fmtIST(epochSec) {
   if (!epochSec) return '';
   const d = new Date((epochSec + IST) * 1000);
@@ -61,10 +90,23 @@ function fmtIST(epochSec) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
+let lastSentHash = '';
+let lastSentTime = 0;
+
 async function sendTelegram(text, customToken, customChatId) {
   const token = customToken || telegramConfig.token;
   const chatId = customChatId || telegramConfig.chatId;
   if (!token || !chatId) return { ok: false, error: 'Bot token or Chat ID is missing' };
+
+  // Safety net throttle: never deliver identical text within 45 seconds
+  const h = String(text || '').trim();
+  const now = Date.now();
+  if (h && h === lastSentHash && now - lastSentTime < 45000) {
+    return { ok: true, skipped: 'duplicate_throttle' };
+  }
+  lastSentHash = h;
+  lastSentTime = now;
+
   const postData = JSON.stringify({
     chat_id: chatId,
     text: text,
@@ -186,7 +228,15 @@ function loadCloudStrats() {
   if (fs.existsSync(CLOUD_STRATS_FILE)) {
     try {
       const j = JSON.parse(fs.readFileSync(CLOUD_STRATS_FILE, 'utf8'));
-      if (Array.isArray(j)) cloudStrats = j;
+      if (Array.isArray(j)) {
+        const seen = new Map();
+        for (const s of j) {
+          if (!s || !s.code) continue;
+          const k = `${(s.symbol || 'NIFTY').toUpperCase()}_${s.tf || 15}_${(s.code || '').trim()}`;
+          seen.set(k, s);
+        }
+        cloudStrats = [...seen.values()];
+      }
     } catch (e) { log('Cloud strats read error:', e.message); }
   }
 }
@@ -244,36 +294,44 @@ function runCloudStrats() {
 
     const symName = SYMBOLS[sym] ? SYMBOLS[sym].name : sym;
     const stratName = cs.name || 'Strategy';
+    const stratKey = cs.id || stratName;
     const lastBarIdx = candleData.t.length - 1;
+    const nowSec = Math.floor(Date.now() / 1000);
 
     // Initial run: register all existing backtest trades as known (ZERO spam)
     if (!cs._alertInit) {
       cs._alertInit = true;
       for (const t of r.trades) {
-        const ek = `${sym}_${tf}_${t.ei}_${t.et}_${t.dir}`;
+        const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
         cs._knownEntries.add(ek);
+        sentAlerts.add(ek);
         if (!t.open && t.reason !== 'Still open') {
-          const xk = `${sym}_${tf}_${t.xi}_${t.xt}_${t.dir}`;
+          const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
           cs._knownExits.add(xk);
+          sentAlerts.add(xk);
         }
       }
+      saveSentAlerts();
       continue;
     }
 
-    // Live trades: alert on recent entries/exits
+    // Live trades: alert only on recent real-time entries/exits within 3x candle timeframe
     for (const t of r.trades) {
-      const isRecentEntry = t.ei >= lastBarIdx - 1;
-      const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1;
+      const entryTime = t.et || candleData.t[t.ei] || 0;
+      const exitTime = t.xt || candleData.t[t.xi] || 0;
+      const isRecentEntry = t.ei >= lastBarIdx - 1 && Math.abs(nowSec - entryTime) < tf * 60 * 3;
+      const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 && Math.abs(nowSec - exitTime) < tf * 60 * 3;
 
       // 1. Entry alert
-      const ek = `${sym}_${tf}_${t.ei}_${t.et}_${t.dir}`;
-      if (isRecentEntry && !cs._knownEntries.has(ek)) {
+      const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
+      if (isRecentEntry && !cs._knownEntries.has(ek) && !isAlertSent(ek)) {
         cs._knownEntries.add(ek);
+        recordSentAlert(ek);
         if (telegramConfig.notifyEntries) {
           const action = t.dir > 0 ? 'BUY' : 'SELL';
           const icon = t.dir > 0 ? '🟢' : '🔴';
           const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-          const timeStr = fmtIST(t.et || candleData.t[t.ei] || Math.floor(Date.now() / 1000));
+          const timeStr = fmtIST(entryTime || nowSec);
 
           const msg = [
             `${icon} <b>NEW TRADE EXECUTED</b>`,
@@ -289,16 +347,17 @@ function runCloudStrats() {
       }
 
       // 2. Exit alert
-      const xk = `${sym}_${tf}_${t.xi}_${t.xt}_${t.dir}`;
-      if (isRecentExit && !cs._knownExits.has(xk)) {
+      const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
+      if (isRecentExit && !cs._knownExits.has(xk) && !isAlertSent(xk)) {
         cs._knownExits.add(xk);
+        recordSentAlert(xk);
         if (telegramConfig.notifyExits) {
           const pts = t.pts != null ? t.pts : (t.xp - t.ep) * t.dir;
           const isWin = pts >= 0;
           const ptsSign = isWin ? '+' : '−';
           const ptsAbs = Math.abs(pts).toFixed(2);
           const xpStr = t.xp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-          const timeStr = fmtIST(t.xt || candleData.t[t.xi] || Math.floor(Date.now() / 1000));
+          const timeStr = fmtIST(exitTime || nowSec);
           const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
           const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
 
@@ -610,6 +669,12 @@ const server = http.createServer(async (req, res) => {
       if (!telegramConfig.enabled) return send(req, res, 200, { ok: false, skipped: 'disabled' });
       if (body.type === 'entry' && !telegramConfig.notifyEntries) return send(req, res, 200, { ok: false, skipped: 'entries_off' });
       if (body.type === 'exit' && !telegramConfig.notifyExits) return send(req, res, 200, { ok: false, skipped: 'exits_off' });
+      if (body.key) {
+        if (isAlertSent(body.key)) {
+          return send(req, res, 200, { ok: true, skipped: 'duplicate' });
+        }
+        recordSentAlert(body.key);
+      }
       const r = await sendTelegram(body.text);
       return send(req, res, 200, r);
     }
@@ -623,12 +688,15 @@ const server = http.createServer(async (req, res) => {
           const chk = Pine.check(b.code);
           if (chk) continue;
           const id = b.id || ('cs_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
-          const idx = cloudStrats.findIndex(s => s.id === id);
+          const symUpper = String(b.symbol || 'NIFTY').toUpperCase();
+          const tfNum = +b.tf || 15;
+          const codeTrimmed = String(b.code || '').trim();
+          const idx = cloudStrats.findIndex(s => s.id === id || (s.name === b.name && s.symbol === symUpper && s.tf === tfNum) || ((s.code || '').trim() === codeTrimmed && (s.symbol || 'NIFTY').toUpperCase() === symUpper && (+s.tf || 15) === tfNum));
           const item = {
-            id,
+            id: idx >= 0 ? cloudStrats[idx].id : id,
             name: String(b.name || 'Cloud Strategy').trim(),
-            symbol: String(b.symbol || 'NIFTY').toUpperCase(),
-            tf: +b.tf || 15,
+            symbol: symUpper,
+            tf: tfNum,
             code: String(b.code),
             inputs: b.inputs || {},
             enabled: b.enabled !== false,

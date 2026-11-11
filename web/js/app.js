@@ -917,15 +917,17 @@ function watchTradeAlerts(S, trades, data, sym, tf) {
 
   const symName = SYMS[sym] || sym;
   const stratName = S.name || 'Strategy';
+  const stratKey = S.id || stratName;
   const lastBarIdx = data.t.length - 1;
+  const nowSec = Math.floor(Date.now() / 1000);
 
   if (!S._alertInit) {
     S._alertInit = true;
     for (const t of trades) {
-      const ek = `${sym}_${tf}_${t.ei}_${t.et}_${t.dir}`;
+      const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
       S._knownEntries.add(ek);
       if (!t.open && t.reason !== 'Still open') {
-        const xk = `${sym}_${tf}_${t.xi}_${t.xt}_${t.dir}`;
+        const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
         S._knownExits.add(xk);
       }
     }
@@ -933,17 +935,19 @@ function watchTradeAlerts(S, trades, data, sym, tf) {
   }
 
   for (const t of trades) {
-    const isRecentEntry = t.ei >= lastBarIdx - 1;
-    const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1;
+    const entryTime = t.et || data.t[t.ei] || 0;
+    const exitTime = t.xt || data.t[t.xi] || 0;
+    const isRecentEntry = t.ei >= lastBarIdx - 1 && Math.abs(nowSec - entryTime) < tf * 60 * 3;
+    const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 && Math.abs(nowSec - exitTime) < tf * 60 * 3;
 
     // 1. Entry alert
-    const ek = `${sym}_${tf}_${t.ei}_${t.et}_${t.dir}`;
+    const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
     if (isRecentEntry && !S._knownEntries.has(ek)) {
       S._knownEntries.add(ek);
       const action = t.dir > 0 ? 'BUY' : 'SELL';
       const icon = t.dir > 0 ? '🟢' : '🔴';
       const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      const timeStr = fmtIST(t.et || data.t[t.ei] || Math.floor(Date.now() / 1000));
+      const timeStr = fmtIST(entryTime || nowSec);
 
       const msg = [
         `${icon} <b>NEW TRADE EXECUTED</b>`,
@@ -957,12 +961,12 @@ function watchTradeAlerts(S, trades, data, sym, tf) {
       fetch(`${API}/api/telegram/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'entry', text: msg })
+        body: JSON.stringify({ type: 'entry', text: msg, key: ek })
       }).catch(() => {});
     }
 
     // 2. Exit alert
-    const xk = `${sym}_${tf}_${t.xi}_${t.xt}_${t.dir}`;
+    const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
     if (isRecentExit && !S._knownExits.has(xk)) {
       S._knownExits.add(xk);
       const pts = t.pts != null ? t.pts : (t.xp - t.ep) * t.dir;
@@ -970,7 +974,7 @@ function watchTradeAlerts(S, trades, data, sym, tf) {
       const ptsSign = isWin ? '+' : '−';
       const ptsAbs = Math.abs(pts).toFixed(2);
       const xpStr = t.xp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      const timeStr = fmtIST(t.xt || data.t[t.xi] || Math.floor(Date.now() / 1000));
+      const timeStr = fmtIST(exitTime || nowSec);
       const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
       const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
 
@@ -988,7 +992,7 @@ function watchTradeAlerts(S, trades, data, sym, tf) {
       fetch(`${API}/api/telegram/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'exit', text: msg })
+        body: JSON.stringify({ type: 'exit', text: msg, key: xk })
       }).catch(() => {});
     }
   }
