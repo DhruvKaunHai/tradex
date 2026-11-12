@@ -38,12 +38,13 @@ const OWNER_CHAT_IDS = (process.env.TELEGRAM_CHAT_ID || '1149546127')
 let telegramConfig = {
   token: process.env.TELEGRAM_BOT_TOKEN || '',
   extraChatIds: [],
+  disabledStrategyOwners: [],
   enabled: true,
   notifyEntries: true,
   notifyExits: true,
   notifyMarket: true
 };
-let friendsList = []; // [{ id: string, name: string, welcomed: boolean }]
+let friendsList = []; // [{ id: string, name: string, welcomed: boolean, strategyAlerts: boolean }]
 const recentFriendSenders = []; // [{ chatId, name, username, ts }]
 const welcomeInFlight = new Map(); // chatId -> Promise
 
@@ -60,7 +61,8 @@ function normalizeFriendEntry(raw) {
   return {
     id,
     name: raw && typeof raw === 'object' ? String(raw.name || '').trim() : '',
-    welcomed: !!(raw && typeof raw === 'object' && raw.welcomed)
+    welcomed: !!(raw && typeof raw === 'object' && raw.welcomed),
+    strategyAlerts: !!(raw && typeof raw === 'object' && raw.strategyAlerts)
   };
 }
 function loadTelegramConfig() {
@@ -69,6 +71,9 @@ function loadTelegramConfig() {
       const j = JSON.parse(fs.readFileSync(TELEGRAM_FILE, 'utf8'));
       if (j.token) telegramConfig.token = j.token;
       if (Array.isArray(j.extraChatIds)) telegramConfig.extraChatIds = j.extraChatIds;
+      if (Array.isArray(j.disabledStrategyOwners)) {
+        telegramConfig.disabledStrategyOwners = j.disabledStrategyOwners.map(s => String(s || '').trim()).filter(Boolean);
+      }
       if (j.enabled !== undefined) telegramConfig.enabled = !!j.enabled;
       if (j.notifyEntries !== undefined) telegramConfig.notifyEntries = !!j.notifyEntries;
       if (j.notifyExits !== undefined) telegramConfig.notifyExits = !!j.notifyExits;
@@ -141,11 +146,42 @@ function upsertFriend(chatId, opts = {}) {
   const entry = {
     id: clean,
     name: String(opts.name || '').trim(),
-    welcomed: !!opts.welcomed
+    welcomed: !!opts.welcomed,
+    strategyAlerts: !!opts.strategyAlerts
   };
   friendsList.push(entry);
   saveFriends(true);
   return { friend: entry, added: true };
+}
+function isStrategyAlertsEnabled(chatId) {
+  const clean = isValidChatId(chatId);
+  if (!clean) return false;
+  if (OWNER_CHAT_IDS.includes(clean)) {
+    const offList = Array.isArray(telegramConfig.disabledStrategyOwners) ? telegramConfig.disabledStrategyOwners : [];
+    return !offList.includes(clean);
+  }
+  const f = getFriend(clean);
+  return !!(f && f.strategyAlerts);
+}
+function setStrategyAlertsForUser(chatId, enabled) {
+  const clean = isValidChatId(chatId);
+  const on = !!enabled;
+  if (!clean) return false;
+  if (OWNER_CHAT_IDS.includes(clean)) {
+    const off = new Set(Array.isArray(telegramConfig.disabledStrategyOwners) ? telegramConfig.disabledStrategyOwners : []);
+    if (on) off.delete(clean);
+    else off.add(clean);
+    telegramConfig.disabledStrategyOwners = [...off];
+    saveTelegramConfig();
+    return on;
+  }
+  const f = getFriend(clean);
+  if (!f) return false;
+  if (!!f.strategyAlerts !== on) {
+    f.strategyAlerts = on;
+    saveFriends(true);
+  }
+  return !!f.strategyAlerts;
 }
 function removeFriendById(chatId) {
   const clean = isValidChatId(chatId);
@@ -296,15 +332,20 @@ function buildFriendWelcomeMessage() {
     'Built by <b>Dhruv</b>, <b>TradeX</b> is a real-time algorithmic trading terminal &amp; cloud alert engine for Indian markets (<b>NIFTY 50</b> &amp; <b>BANK NIFTY</b>).',
     '',
     '<b>What TradeX does:</b>',
-    '• 📡 Streams live market data &amp; runs Pine Script strategies 24/7 on the cloud',
-    '• ⚡ Sends instant <b>BUY / SELL entries</b>, trailing <b>SL / TP exits</b> &amp; PnL updates',
-    '• 🔔 Delivers Market Open (09:15 IST) &amp; Close (15:30 IST) position summaries',
-    '• 📊 Interactive commands right here on Telegram:',
-    '   – /info — Active open trades &amp; running strategies',
-    '   – /status — Market status &amp; live index prices',
-    '   – /help — Commands guide',
+    '• 📡 Streams live index market data &amp; runs Pine Script strategies 24/7 on the cloud',
+    '• 🔔 Delivers Market Open (09:15 IST) &amp; Close (15:30 IST) summaries automatically',
+    '• ⚡ Sends real-time BUY / SELL entries &amp; exit PnL alerts (opt-in per chat)',
+    '',
+    '<b>📋 Bot Commands:</b>',
+    '• /strategies — Turn live strategy entry/exit alerts <b>ON / OFF</b> (for your chat only)',
+    '   (Or use /strategies_on or /strategies_off directly)',
+    '• /status — Request live NIFTY 50 &amp; BANK NIFTY market data &amp; session status',
+    '• /info — View currently open trade positions &amp; active strategies',
+    '• /help — Show all commands and your current alert setting',
     '━━━━━━━━━━━━━━━━━━━━━',
-    '🚀 Your Telegram is now linked to live TradeX alerts!'
+    '🔕 <b>Live Strategy Alerts: OFF</b> for your Telegram by default.',
+    '👉 Tap /strategies_on (or /strategies) anytime to start receiving live daily strategy alerts!',
+    '🔔 Market Open/Close summaries and /status market data are already active.'
   ].join('\n');
 }
 
@@ -346,12 +387,18 @@ async function sendFriendWelcomeIfNeeded(chatId, customToken, msgContext) {
   return p;
 }
 
-async function sendTelegram(text, customToken, customChatId, skipThrottle = false) {
+async function sendTelegram(text, customToken, customChatId, skipThrottle = false, opts = {}) {
   const token = customToken || telegramConfig.token;
-  const targets = customChatId
+  const category = (opts && opts.category) || 'general';
+  let targets = customChatId
     ? String(customChatId).split(',').map(s => s.trim()).filter(s => /^-?\d+$/.test(s))
     : getRecipientChatIds();
-  if (!token || !targets.length) return { ok: false, error: 'Bot token or Chat ID is missing' };
+  if (!token) return { ok: false, error: 'Bot token is missing' };
+  if (!customChatId && category === 'strategy') {
+    targets = targets.filter(cid => isStrategyAlertsEnabled(cid));
+    if (!targets.length) return { ok: true, skipped: 'no_strategy_subscribers' };
+  }
+  if (!targets.length) return { ok: false, error: 'Chat ID is missing' };
 
   // Safety net throttle: never deliver identical alert text within 45 seconds
   const h = String(text || '').trim();
@@ -513,7 +560,7 @@ function checkMarketAlerts() {
       '',
       '🎯 TradeX is tracking live tick-by-tick. Have a disciplined trading session!'
     ].join('\n');
-    sendTelegram(msg).catch(() => {});
+    sendTelegram(msg, null, null, false, { category: 'market' }).catch(() => {});
   }
 
   // 2. Market Close Alert at 03:30 PM IST with index points summary
@@ -555,7 +602,7 @@ function checkMarketAlerts() {
       '━━━━━━━━━━━━━━━━━━━━━',
       'Trading session ended. Have a great evening!'
     ].filter(Boolean).join('\n');
-    sendTelegram(msg).catch(() => {});
+    sendTelegram(msg, null, null, false, { category: 'market' }).catch(() => {});
   }
 }
 
@@ -734,7 +781,7 @@ function runCloudStrats() {
             `⏰ <b>Time</b>: ${timeStr} IST`
           ].join('\n');
 
-          sendTelegram(msg).catch(() => {});
+          sendTelegram(msg, null, null, false, { category: 'strategy' }).catch(() => {});
         }
       }
 
@@ -773,7 +820,7 @@ function runCloudStrats() {
             `🧠 <b>Strategy</b>: ${stratName}`
           ].join('\n');
 
-          sendTelegram(msg).catch(() => {});
+          sendTelegram(msg, null, null, false, { category: 'strategy' }).catch(() => {});
         }
       }
     }
@@ -1032,7 +1079,7 @@ const server = http.createServer(async (req, res) => {
     const publicTgConfig = () => ({
       ownerActive: OWNER_CHAT_IDS.length > 0,
       extraChatIds: friendsList.map(f => f.id),
-      friends: friendsList.map(f => ({ id: f.id, name: f.name || '', welcomed: !!f.welcomed })),
+      friends: friendsList.map(f => ({ id: f.id, name: f.name || '', welcomed: !!f.welcomed, strategyAlerts: !!f.strategyAlerts })),
       enabled: telegramConfig.enabled,
       notifyEntries: telegramConfig.notifyEntries,
       notifyExits: telegramConfig.notifyExits,
@@ -1097,7 +1144,7 @@ const server = http.createServer(async (req, res) => {
             if (byOldId.has(id)) return byOldId.get(id);
             const known = recentFriendSenders.find(s => s.chatId === id);
             newlyAddedFriends.push(id);
-            return { id, name: known ? known.name : '', welcomed: false };
+            return { id, name: known ? known.name : '', welcomed: false, strategyAlerts: false };
           });
           saveFriends(true);
         }
@@ -1191,7 +1238,8 @@ const server = http.createServer(async (req, res) => {
         }
         recordSentAlert(body.key);
       }
-      const r = await sendTelegram(body.text);
+      const cat = (body.type === 'entry' || body.type === 'exit') ? 'strategy' : (body.category || 'general');
+      const r = await sendTelegram(body.text, null, null, false, { category: cat });
       return send(req, res, 200, sanitizeTgSendResult(r));
     }
     if (p === '/api/cloud-strats') {
@@ -1318,7 +1366,9 @@ async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
         if (!recipients.includes(chatId)) continue; // security: only answer authorized recipients
 
         const rawText = msg.text ? String(msg.text).trim() : '';
-        const text = rawText ? rawText.split(/\s+/)[0].toLowerCase().replace(/@\w+$/, '') : '';
+        const parts = rawText ? rawText.split(/\s+/) : [];
+        const text = parts.length ? parts[0].toLowerCase().replace(/@\w+$/, '') : '';
+        const arg = parts.length > 1 ? parts[1].toLowerCase() : '';
         const friend = getFriend(chatId);
         if (friend && !friend.welcomed) {
           await sendFriendWelcomeIfNeeded(chatId, token, msg);
@@ -1394,16 +1444,63 @@ async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
             'Send /info to view open trades.'
           ].join('\n');
           sendTelegramSingle(token, chatId, resp).catch(() => {});
+        } else if (['/strategies', '/strategy', '/strategies_on', '/strategy_on', '/strategies_off', '/strategy_off'].includes(text)) {
+          let nextState;
+          if (text.endsWith('_on') || ['on', 'start', 'enable', '1', 'yes'].includes(arg)) {
+            nextState = setStrategyAlertsForUser(chatId, true);
+          } else if (text.endsWith('_off') || ['off', 'stop', 'disable', '0', 'no'].includes(arg)) {
+            nextState = setStrategyAlertsForUser(chatId, false);
+          } else if (arg === 'status') {
+            nextState = isStrategyAlertsEnabled(chatId);
+          } else if (arg) {
+            const cur = isStrategyAlertsEnabled(chatId);
+            const usage = [
+              '⚙️ <b>STRATEGY ALERTS USAGE</b>',
+              '━━━━━━━━━━━━━━━━━━━━━',
+              `Current status (your chat): <b>${cur ? 'ON ✅' : 'OFF ⏸️'}</b>`,
+              '• /strategies_on — Start live daily strategy alerts',
+              '• /strategies_off — Stop live daily strategy alerts',
+              '• /strategies — Toggle ON / OFF'
+            ].join('\n');
+            sendTelegramSingle(token, chatId, usage).catch(() => {});
+            continue;
+          } else {
+            nextState = setStrategyAlertsForUser(chatId, !isStrategyAlertsEnabled(chatId));
+          }
+
+          const resp = nextState
+            ? [
+                '✅ <b>LIVE STRATEGY ALERTS: ON</b>',
+                '━━━━━━━━━━━━━━━━━━━━━',
+                '🚀 You will now receive real-time cloud strategy <b>BUY / SELL entries</b> and <b>exit PnL</b> alerts on your Telegram every trading day.',
+                '',
+                '<i>Exclusive to your Telegram chat only.</i>',
+                'Tap /strategies_off (or /strategies) anytime to stop.'
+              ].join('\n')
+            : [
+                '⏸️ <b>LIVE STRATEGY ALERTS: OFF</b>',
+                '━━━━━━━━━━━━━━━━━━━━━',
+                '🔕 Live strategy entry &amp; exit alerts are turned off for your Telegram.',
+                '✅ Market Open / Close summaries (09:15 &amp; 15:30 IST) and /status / /info commands remain active.',
+                '',
+                '<i>Exclusive to your Telegram chat only.</i>',
+                'Tap /strategies_on (or /strategies) anytime to turn them back ON.'
+              ].join('\n');
+          sendTelegramSingle(token, chatId, resp).catch(() => {});
         } else if (text === '/help' || text === '/start') {
+          const stratOn = isStrategyAlertsEnabled(chatId);
           const resp = [
             '🤖 <b>TradeX Terminal Bot</b>',
             '━━━━━━━━━━━━━━━━━━━━━',
-            'Available commands:',
-            '• /info - View active trade positions & running strategy details',
-            '• /status - View market status and live index prices',
-            '• /help - Show this commands guide',
+            '<b>Available Commands:</b>',
+            '• /strategies — Start or stop live strategy BUY/SELL &amp; exit alerts (your chat only)',
+            '   ↳ /strategies_on  |  /strategies_off',
+            '• /status — View live NIFTY 50 &amp; BANK NIFTY market data &amp; market state',
+            '• /info — View active trade positions &amp; running strategy details',
+            '• /help — Show this commands guide',
             '━━━━━━━━━━━━━━━━━━━━━',
-            'Real-time alerts for entries, exits, and market open/close are delivered automatically.'
+            `🔔 <b>Your Live Strategy Alerts:</b> ${stratOn ? '<b>ON ✅</b>' : '<b>OFF ⏸️</b> (send /strategies_on to enable)'}`,
+            '📡 Market Open/Close summaries (09:15 / 15:30 IST) are delivered automatically.'
           ].join('\n');
           sendTelegramSingle(token, chatId, resp).catch(() => {});
         }
