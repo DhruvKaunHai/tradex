@@ -918,18 +918,28 @@ async function renderData() {
 let tgConfig = {
   ownerActive: true,
   extraChatIds: [],
+  friends: [],
   enabled: true,
   notifyEntries: true,
   notifyExits: true,
   notifyMarket: true,
   configured: false
 };
-async function fetchTgConfig() {
+let tgSyncSettingsUi = null;
+async function fetchTgConfig(syncUi = true) {
   try {
     const res = await fetch(`${API}/api/telegram/config`);
     if (res.ok) {
       const j = await res.json();
-      if (j && j.config) tgConfig = Object.assign(tgConfig, j.config);
+      if (j && j.config) {
+        tgConfig = Object.assign(tgConfig, j.config);
+        if (!Array.isArray(tgConfig.friends)) {
+          tgConfig.friends = (tgConfig.extraChatIds || []).map(id => ({ id, name: '', welcomed: false }));
+        }
+        if (syncUi && A.view === 'settings' && typeof tgSyncSettingsUi === 'function') {
+          tgSyncSettingsUi();
+        }
+      }
     }
   } catch (_) {}
 }
@@ -966,14 +976,19 @@ function renderSettings() {
         <span style="font-weight:600;font-size:12px;min-width:90px">Owner Alerts:</span>
         <span style="font-size:12px;color:var(--up);display:inline-flex;align-items:center;gap:6px">
           <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#35d6ae"></span>
-          <b>${tgConfig.ownerActive ? 'Secured & Locked on Server' : 'Server Env Protected'}</b>
+          <b id="tgOwnerState">${tgConfig.ownerActive ? 'Secured & Locked on Server' : 'Server Env Protected'}</b>
           <span class="muted">(Cannot be viewed or removed from browser)</span>
         </span>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <label style="font-weight:600;font-size:12px;min-width:90px">Friend IDs:</label>
-        <input type="text" id="tgExtraInp" class="inp" style="flex:1;min-width:180px;font-family:monospace;font-size:12px" value="${esc((tgConfig.extraChatIds || []).join(', '))}" placeholder="Optional comma-separated friend Chat IDs">
-        <button class="btn small" id="tgDetectBtn" title="Auto-detect latest friend Chat ID from Telegram">Auto-Detect Friend ID</button>
+      <div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
+        <span style="font-weight:600;font-size:12px;min-width:90px;padding-top:4px">Friends:</span>
+        <div id="tgFriendsList" style="flex:1;min-width:190px;display:flex;gap:6px;flex-wrap:wrap;align-items:center"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <label style="font-weight:600;font-size:12px;min-width:90px">Add Friend:</label>
+        <input type="text" id="tgAddFriendInp" class="inp" style="flex:1;min-width:190px;font-family:monospace;font-size:12px" placeholder="Enter friend's Telegram Chat ID (e.g. 1148568929)">
+        <button type="button" class="btn primary small" id="tgAddFriendBtn">Add Friend</button>
+        <button type="button" class="btn small" id="tgDetectBtn" title="Auto-detect latest friend Chat ID from Telegram">Auto-Detect Friend ID</button>
       </div>
       <details style="margin-top:2px">
         <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none">Change or Rotate Bot Token</summary>
@@ -996,9 +1011,9 @@ function renderSettings() {
       </div>
       <p class="note" style="margin-top:6px;line-height:1.6">
         <b>How to add a Friend's Telegram ID:</b><br>
-        1. Ask your friend to open <a href="https://t.me/TradeX_terminal_bot" target="_blank" style="color:var(--accent)">@TradeX_terminal_bot</a> in Telegram and click <b>Start</b>.<br>
-        2. Click <b>Auto-Detect Friend ID</b> above (or paste their numeric Chat ID into <b>Friend IDs</b>, comma-separated for multiple).<br>
-        3. Click <b>Save Settings</b>, then <b>Send Test Alert</b> to confirm delivery.
+        1. Ask your friend to open <a href="https://t.me/TradeX_terminal_bot" target="_blank" style="color:var(--accent)">@TradeX_terminal_bot</a> in Telegram and tap <b>Start</b>.<br>
+        2. Click <b>Auto-Detect Friend ID</b> (or paste their numeric Chat ID into <b>Add Friend</b>) and click <b>Add Friend</b>.<br>
+        3. New friends automatically receive a TradeX introduction message (built by Dhruv) as their very first message, followed by live trade alerts.
       </p>
     </div>
   </div>
@@ -1007,28 +1022,184 @@ function renderSettings() {
   <div class="panel"><header><h3>Pine support</h3><p>${Pine.functions.length} built-in functions</p></header><p class="note" style="line-height:1.7">Works: strategy and indicator scripts in v5 or v6 style, inputs, var, if, for, while, switch, your own functions, arrays, history like close[1], the common ta.* and math.* functions, strategy.entry, exit (stop, target, trailing), close, close_all, plot, plotshape, hline and bgcolor.<br>Not available: request.security, libraries, tables, labels and boxes (drawings are skipped, the logic still runs), matrices and maps. The editor names the line when a script uses something missing.</p></div>
   <div class="panel"><header><h3>Workspace</h3></header><dl class="kv"><dt>Server address</dt><dd>${esc(API || location.origin)}</dd><dt>Scripts saved in this browser</dt><dd>${scripts.length}</dd></dl><p style="margin:12px 0 0;display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" id="expAll">Back up all scripts</button><button class="btn small" id="resetAll">Clear this browser's TradeX data</button></p><p class="note" style="margin-top:8px">Scripts and settings live in this browser only. Back them up before clearing browser data or moving to another computer.</p></div></div></div></div>`;
 
-  const setTgStatus = (msg, isErr, isOk) => {
+  let togglesDirty = false;
+  let userActed = false;
+  let detectedHint = null; // { chatId, name }
+
+  const setTgStatus = (msg, isErr, isOk, colorOverride) => {
     const s = $('#tgStatusMsg'); if (!s) return;
     s.innerHTML = msg;
-    s.style.color = isErr ? 'var(--down)' : isOk ? 'var(--up)' : 'var(--muted)';
+    s.style.color = colorOverride || (isErr ? 'var(--down)' : isOk ? 'var(--up)' : 'var(--muted)');
   };
-  const extraCnt = (tgConfig.extraChatIds || []).length;
-  setTgStatus(
-    `Owner notifications active & secured on server (@TradeX_terminal_bot)${extraCnt ? ` + ${extraCnt} friend ID${extraCnt > 1 ? 's' : ''}` : ''}`,
-    false,
-    true
-  );
 
-  const parseExtraIds = (raw) => [...new Set(String(raw || '').split(/[\s,;]+/).map(s => s.trim()).filter(s => /^-?\d+$/.test(s)))];
+  const getFriends = () => Array.isArray(tgConfig.friends) && tgConfig.friends.length
+    ? tgConfig.friends
+    : (tgConfig.extraChatIds || []).map(id => ({ id, name: '', welcomed: false }));
+
+  const renderFriends = () => {
+    const host = $('#tgFriendsList'); if (!host) return;
+    const list = getFriends();
+    if (!list.length) {
+      host.innerHTML = '<span class="muted" style="font-size:12px">No friends added yet.</span>';
+      return;
+    }
+    host.innerHTML = list.map(f => {
+      const badgeColor = f.welcomed ? 'var(--up)' : '#f5a623';
+      const badgeText = f.welcomed ? 'Active' : 'Waiting for Start';
+      return `<span style="display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;border:1px solid var(--line);background:var(--bg);font-size:12px">
+        <span style="width:6px;height:6px;border-radius:50%;background:${badgeColor};display:inline-block"></span>
+        <span style="font-family:monospace;font-weight:600">${esc(f.id)}</span>
+        ${f.name ? `<span class="muted">(${esc(f.name)})</span>` : ''}
+        <span style="font-size:11px;color:${badgeColor}">${badgeText}</span>
+        <button type="button" class="tg-rm-friend" data-id="${esc(f.id)}" title="Remove friend ${esc(f.id)}" style="background:none;border:0;color:var(--muted);cursor:pointer;padding:0 2px;font-size:14px;line-height:1">×</button>
+      </span>`;
+    }).join('');
+    $$('.tg-rm-friend', host).forEach(btn => {
+      btn.onclick = async () => {
+        const fid = btn.dataset.id;
+        userActed = true;
+        btn.disabled = true;
+        setTgStatus(`Removing friend ${esc(fid)}...`, false, false);
+        try {
+          const res = await fetch(`${API}/api/telegram/friends/remove`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chatId: fid })
+          });
+          const j = await res.json();
+          if (j && j.ok) {
+            if (j.config) tgConfig = Object.assign(tgConfig, j.config);
+            renderFriends();
+            setTgStatus(`Removed friend <b>${esc(fid)}</b> from TradeX alerts.`, false, true);
+          } else {
+            btn.disabled = false;
+            setTgStatus(`Failed to remove: ${esc((j && j.error) || 'Server error')}`, true);
+          }
+        } catch (e) {
+          btn.disabled = false;
+          setTgStatus(`Failed to remove: ${esc(e.message)}`, true);
+        }
+      };
+    });
+  };
+
+  const renderSummaryStatus = () => {
+    const cnt = getFriends().length;
+    setTgStatus(
+      `Owner notifications active & secured on server (@TradeX_terminal_bot)${cnt ? ` + ${cnt} friend${cnt > 1 ? 's' : ''}` : ''}`,
+      false,
+      true
+    );
+  };
+
+  tgSyncSettingsUi = () => {
+    if (!$('#tgFriendsList')) return;
+    if ($('#tgOwnerState')) $('#tgOwnerState').textContent = tgConfig.ownerActive ? 'Secured & Locked on Server' : 'Server Env Protected';
+    renderFriends();
+    if (!togglesDirty) {
+      if ($('#tgEnableInp')) $('#tgEnableInp').checked = !!tgConfig.enabled;
+      if ($('#tgEntryInp')) $('#tgEntryInp').checked = !!tgConfig.notifyEntries;
+      if ($('#tgExitInp')) $('#tgExitInp').checked = !!tgConfig.notifyExits;
+      if ($('#tgMarketInp')) $('#tgMarketInp').checked = !!tgConfig.notifyMarket;
+    }
+    if (!userActed) renderSummaryStatus();
+  };
+
+  ['tgEnableInp', 'tgEntryInp', 'tgExitInp', 'tgMarketInp'].forEach(id => {
+    const cb = $('#' + id);
+    if (cb) cb.onchange = () => { togglesDirty = true; };
+  });
+
+  renderFriends();
+  renderSummaryStatus();
+  fetchTgConfig(true);
+
+  const addFriendFromInput = async () => {
+    const inp = $('#tgAddFriendInp');
+    const raw = inp ? inp.value.trim() : '';
+    if (!raw) {
+      setTgStatus('Enter your friend\'s numeric Telegram Chat ID or click Auto-Detect Friend ID.', true);
+      return { ok: false, empty: true };
+    }
+    const tokens = raw.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+    const bad = tokens.find(t => !/^-?\d+$/.test(t));
+    if (bad) {
+      setTgStatus(`Invalid Chat ID "<b>${esc(bad)}</b>". Telegram IDs contain numbers only — ask your friend to tap Start on @TradeX_terminal_bot, then click Auto-Detect Friend ID.`, true);
+      return { ok: false };
+    }
+    const btn = $('#tgAddFriendBtn');
+    userActed = true;
+    if (btn) btn.disabled = true;
+    setTgStatus('Adding friend and sending TradeX welcome message...', false, false);
+    try {
+      const hintName = (detectedHint && tokens.length === 1 && detectedHint.chatId === tokens[0]) ? detectedHint.name : '';
+      const res = await fetch(`${API}/api/telegram/friends/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatIds: tokens, name: hintName })
+      });
+      const j = await res.json();
+      if (j && j.config) tgConfig = Object.assign(tgConfig, j.config);
+      renderFriends();
+      if (!j || !j.ok) {
+        setTgStatus(`${esc((j && j.error) || 'Failed to add friend')}`, true);
+        return { ok: false };
+      }
+      if (inp) inp.value = '';
+      detectedHint = null;
+      const results = j.results || [];
+      const sentNow = results.filter(r => r.welcomeSent);
+      const waitingStart = results.filter(r => r.needsStart);
+      const alreadyReady = results.filter(r => !r.welcomeSent && r.welcomed);
+      const errored = results.filter(r => !r.welcomed && !r.needsStart);
+      if (waitingStart.length && !sentNow.length) {
+        setTgStatus(
+          `Friend <b>${esc(waitingStart.map(r => r.chatId).join(', '))}</b> added! Ask them to open <a href="https://t.me/TradeX_terminal_bot" target="_blank" style="color:var(--accent)">@TradeX_terminal_bot</a> and tap <b>Start</b> — TradeX will send the welcome intro (built by Dhruv) as their very first message.`,
+          false,
+          false,
+          '#f5a623'
+        );
+      } else if (errored.length && !sentNow.length && !alreadyReady.length) {
+        setTgStatus(`Friend saved, but Telegram returned: ${esc(errored[0].error || 'Unknown error')}`, true);
+      } else if (sentNow.length) {
+        const names = sentNow.map(r => `${esc(r.chatId)}${r.name ? ` (${esc(r.name)})` : ''}`).join(', ');
+        const extra = waitingStart.length ? ` • Waiting for Start: ${esc(waitingStart.map(r => r.chatId).join(', '))}` : '';
+        setTgStatus(`Friend <b>${names}</b> added &amp; TradeX welcome intro delivered as their first message!${extra}`, false, true);
+      } else {
+        const names = alreadyReady.map(r => `${esc(r.chatId)}${r.name ? ` (${esc(r.name)})` : ''}`).join(', ');
+        setTgStatus(`Friend <b>${names}</b> is active in TradeX alerts.`, false, true);
+      }
+      return { ok: true, results };
+    } catch (e) {
+      setTgStatus(`Failed to add friend: ${esc(e.message)}`, true);
+      return { ok: false };
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  };
+
+  $('#tgAddFriendBtn').onclick = () => addFriendFromInput();
+  $('#tgAddFriendInp').onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addFriendFromInput(); }
+  };
 
   $('#tgSaveBtn').onclick = async () => {
-    tgConfig.extraChatIds = parseExtraIds($('#tgExtraInp').value);
+    userActed = true;
+    if ($('#tgAddFriendInp') && $('#tgAddFriendInp').value.trim()) {
+      const addRes = await addFriendFromInput();
+      if (!addRes.ok) return;
+    }
     tgConfig.enabled = $('#tgEnableInp').checked;
     tgConfig.notifyEntries = $('#tgEntryInp').checked;
     tgConfig.notifyExits = $('#tgExitInp').checked;
     tgConfig.notifyMarket = $('#tgMarketInp').checked;
     const newTok = $('#tgTokenInp') ? $('#tgTokenInp').value.trim() : '';
-    const payload = { ...tgConfig };
+    const payload = {
+      enabled: tgConfig.enabled,
+      notifyEntries: tgConfig.notifyEntries,
+      notifyExits: tgConfig.notifyExits,
+      notifyMarket: tgConfig.notifyMarket
+    };
     if (newTok) payload.token = newTok;
     try {
       const res = await fetch(`${API}/api/telegram/config`, {
@@ -1038,42 +1209,59 @@ function renderSettings() {
       });
       const j = await res.json();
       if (j && j.ok) {
-        if (j.config) {
-          tgConfig = Object.assign(tgConfig, j.config);
-          $('#tgExtraInp').value = (tgConfig.extraChatIds || []).join(', ');
-        }
+        togglesDirty = false;
+        if (j.config) tgConfig = Object.assign(tgConfig, j.config);
+        renderFriends();
         if (newTok) {
           $('#tgTokenInp').value = '';
           setTgStatus('Telegram token and settings updated successfully.', false, true);
         } else {
           setTgStatus('Telegram settings saved. Owner alerts remain locked on server.', false, true);
         }
+      } else {
+        setTgStatus(`Failed to save: ${esc(j ? j.error : 'Server error')}`, true);
       }
-      else setTgStatus(`Failed to save: ${esc(j ? j.error : 'Server error')}`, true);
     } catch (e) {
       setTgStatus(`Failed to save: ${esc(e.message)}`, true);
     }
   };
 
   $('#tgDetectBtn').onclick = async () => {
+    userActed = true;
+    const btn = $('#tgDetectBtn');
+    if (btn) btn.disabled = true;
     setTgStatus('Checking Telegram for latest friend Chat ID...', false, false);
     try {
       const res = await fetch(`${API}/api/telegram/detect`);
       const j = await res.json();
       if (j && j.ok && j.chatId) {
-        const cur = parseExtraIds($('#tgExtraInp').value);
-        if (!cur.includes(j.chatId)) cur.push(j.chatId);
-        $('#tgExtraInp').value = cur.join(', ');
-        setTgStatus(`Detected Friend Chat ID: <b>${esc(j.chatId)}</b>${j.name ? ` (${esc(j.name)})` : ''}. Click <b>Save Settings</b> to activate.`, false, true);
+        detectedHint = { chatId: j.chatId, name: j.name || '' };
+        if ($('#tgAddFriendInp')) $('#tgAddFriendInp').value = j.chatId;
+        const label = `${esc(j.chatId)}${j.name ? ` (${esc(j.name)})` : ''}`;
+        if (j.alreadyAdded) {
+          setTgStatus(`Detected Friend ID: <b>${label}</b> (already in your Friends list).`, false, true);
+        } else {
+          setTgStatus(`Detected Friend Chat ID: <b>${label}</b>. Click <b>Add Friend</b> to activate &amp; send their TradeX welcome message.`, false, true);
+          if ($('#tgAddFriendBtn')) $('#tgAddFriendBtn').focus();
+        }
       } else {
         setTgStatus(`${esc((j && j.error) || 'Could not find message. Ask your friend to open @TradeX_terminal_bot and tap Start.')}`, true);
       }
     } catch (e) {
       setTgStatus(`Error detecting chat: ${esc(e.message)}`, true);
+    } finally {
+      if (btn) btn.disabled = false;
     }
   };
 
   $('#tgTestBtn').onclick = async () => {
+    userActed = true;
+    if ($('#tgAddFriendInp') && $('#tgAddFriendInp').value.trim()) {
+      const addRes = await addFriendFromInput();
+      if (!addRes.ok) return;
+    }
+    const btn = $('#tgTestBtn');
+    if (btn) btn.disabled = true;
     setTgStatus('Sending test alert to Telegram...', false, false);
     try {
       const res = await fetch(`${API}/api/telegram/test`, {
@@ -1082,10 +1270,34 @@ function renderSettings() {
         body: JSON.stringify({})
       });
       const j = await res.json();
-      if (j && j.ok) setTgStatus('Test notification delivered. Check Telegram.', false, true);
-      else setTgStatus(`Delivery failed: ${esc((j && j.error) || 'Telegram API error')}`, true);
+      await fetchTgConfig(false);
+      renderFriends();
+      if (j && (j.ok || j.allDelivered)) {
+        const fr = j.friendResults || [];
+        const okFriends = fr.filter(f => f.ok);
+        const needsStart = fr.filter(f => !f.ok && f.needsStart);
+        const failed = fr.filter(f => !f.ok && !f.needsStart);
+        if (!needsStart.length && !failed.length && j.ownerOk !== false) {
+          setTgStatus(
+            `Test alert delivered to Owner${okFriends.length ? ` &amp; ${okFriends.length} friend${okFriends.length > 1 ? 's' : ''}` : ''}. Check Telegram!`,
+            false,
+            true
+          );
+        } else {
+          const parts = [];
+          if (j.ownerOk) parts.push('Owner delivered');
+          if (okFriends.length) parts.push(`${okFriends.length} friend${okFriends.length > 1 ? 's' : ''} delivered`);
+          if (needsStart.length) parts.push(`Friend ${esc(needsStart.map(f => f.chatId).join(', '))} must tap Start on @TradeX_terminal_bot first`);
+          if (failed.length) parts.push(`Failed for ${esc(failed.map(f => `${f.chatId} (${f.error || 'error'})`).join(', '))}`);
+          setTgStatus(parts.join(' • '), false, false, needsStart.length ? '#f5a623' : 'var(--down)');
+        }
+      } else {
+        setTgStatus(`Delivery failed: ${esc((j && j.error) || 'Telegram API error')}`, true);
+      }
     } catch (e) {
       setTgStatus(`Delivery failed: ${esc(e.message)}`, true);
+    } finally {
+      if (btn) btn.disabled = false;
     }
   };
 

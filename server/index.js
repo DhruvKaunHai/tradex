@@ -27,7 +27,9 @@ const store = {};
 for (const s in SYMBOLS) store[s] = { t: [], o: [], h: [], l: [], c: [], ver: 0, dirty: false, cache: {}, price: null, priceAt: 0, prevClose: null, source: '', lastOk: 0, lastErr: '', fails: 0, seeded: false };
 
 /* ---------- telegram alerts ---------- */
+const serverBootSec = Math.floor(Date.now() / 1000);
 const TELEGRAM_FILE = path.join(DATA, 'telegram.json');
+const FRIENDS_FILE = path.join(DATA, 'friends.json');
 const OWNER_CHAT_IDS = (process.env.TELEGRAM_CHAT_ID || '1149546127')
   .split(',')
   .map(s => s.trim())
@@ -41,6 +43,26 @@ let telegramConfig = {
   notifyExits: true,
   notifyMarket: true
 };
+let friendsList = []; // [{ id: string, name: string, welcomed: boolean }]
+const recentFriendSenders = []; // [{ chatId, name, username, ts }]
+const welcomeInFlight = new Map(); // chatId -> Promise
+
+function escapeTgHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function isValidChatId(id) {
+  const clean = String(id || '').trim();
+  return /^-?\d+$/.test(clean) ? clean : '';
+}
+function normalizeFriendEntry(raw) {
+  const id = isValidChatId(raw && typeof raw === 'object' ? raw.id : raw);
+  if (!id || OWNER_CHAT_IDS.includes(id)) return null;
+  return {
+    id,
+    name: raw && typeof raw === 'object' ? String(raw.name || '').trim() : '',
+    welcomed: !!(raw && typeof raw === 'object' && raw.welcomed)
+  };
+}
 function loadTelegramConfig() {
   if (fs.existsSync(TELEGRAM_FILE)) {
     try {
@@ -54,23 +76,122 @@ function loadTelegramConfig() {
     } catch (e) { log('Telegram config read error:', e.message); }
   }
 }
-function getRecipientChatIds() {
-  const ids = new Set(OWNER_CHAT_IDS);
-  if (Array.isArray(telegramConfig.extraChatIds)) {
-    for (const id of telegramConfig.extraChatIds) {
-      const clean = String(id || '').trim();
-      if (clean && /^-?\d+$/.test(clean)) ids.add(clean);
-    }
+function loadFriends() {
+  const byId = new Map();
+  if (fs.existsSync(FRIENDS_FILE)) {
+    try {
+      const arr = JSON.parse(fs.readFileSync(FRIENDS_FILE, 'utf8'));
+      if (Array.isArray(arr)) {
+        for (const item of arr) {
+          const norm = normalizeFriendEntry(item);
+          if (norm) byId.set(norm.id, norm);
+        }
+      }
+    } catch (e) { log('Friends read error:', e.message); }
   }
-  return [...ids];
+  const envFriends = String(process.env.TELEGRAM_FRIEND_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+  for (const rawId of [...envFriends, ...(telegramConfig.extraChatIds || [])]) {
+    const norm = normalizeFriendEntry(rawId);
+    if (norm && !byId.has(norm.id)) byId.set(norm.id, norm);
+  }
+  friendsList = [...byId.values()];
+  telegramConfig.extraChatIds = friendsList.map(f => f.id);
 }
 function saveTelegramConfig() {
   try {
     fs.mkdirSync(DATA, { recursive: true });
+    telegramConfig.extraChatIds = friendsList.map(f => f.id);
     fs.writeFileSync(TELEGRAM_FILE, JSON.stringify(telegramConfig, null, 2));
   } catch (e) { log('Telegram config save error:', e.message); }
 }
+function saveFriends(syncGitHub = true) {
+  try {
+    fs.mkdirSync(DATA, { recursive: true });
+    const deduped = [];
+    const seen = new Set();
+    for (const item of friendsList) {
+      const norm = normalizeFriendEntry(item);
+      if (norm && !seen.has(norm.id)) {
+        seen.add(norm.id);
+        deduped.push(norm);
+      }
+    }
+    friendsList = deduped;
+    telegramConfig.extraChatIds = friendsList.map(f => f.id);
+    fs.writeFileSync(FRIENDS_FILE, JSON.stringify(friendsList, null, 2));
+    if (fs.existsSync(TELEGRAM_FILE)) saveTelegramConfig();
+    if (syncGitHub) queueGitHubSync('friends');
+  } catch (e) { log('Friends save error:', e.message); }
+}
+function getFriend(chatId) {
+  const clean = isValidChatId(chatId);
+  return clean ? (friendsList.find(f => f.id === clean) || null) : null;
+}
+function upsertFriend(chatId, opts = {}) {
+  const clean = isValidChatId(chatId);
+  if (!clean || OWNER_CHAT_IDS.includes(clean)) return { friend: null, added: false };
+  const existing = friendsList.find(f => f.id === clean);
+  if (existing) {
+    let changed = false;
+    if (opts.name && !existing.name) { existing.name = String(opts.name).trim(); changed = true; }
+    if (opts.welcomed !== undefined && existing.welcomed !== !!opts.welcomed) { existing.welcomed = !!opts.welcomed; changed = true; }
+    if (changed) saveFriends(true);
+    return { friend: existing, added: false };
+  }
+  const entry = {
+    id: clean,
+    name: String(opts.name || '').trim(),
+    welcomed: !!opts.welcomed
+  };
+  friendsList.push(entry);
+  saveFriends(true);
+  return { friend: entry, added: true };
+}
+function removeFriendById(chatId) {
+  const clean = isValidChatId(chatId);
+  if (!clean) return false;
+  const before = friendsList.length;
+  friendsList = friendsList.filter(f => f.id !== clean);
+  if (friendsList.length !== before) {
+    saveFriends(true);
+    return true;
+  }
+  return false;
+}
+function extractTgSenderInfo(msg) {
+  if (!msg || !msg.chat || !msg.chat.id) return null;
+  const chatId = String(msg.chat.id);
+  const from = msg.from || {};
+  const chat = msg.chat || {};
+  const fullName = `${from.first_name || ''} ${from.last_name || ''}`.trim()
+    || `${chat.first_name || ''} ${chat.last_name || ''}`.trim()
+    || String(chat.title || '').trim();
+  const username = String(from.username || chat.username || '').trim();
+  return { chatId, name: fullName, username, ts: Date.now() };
+}
+function recordFriendSender(msg) {
+  const info = extractTgSenderInfo(msg);
+  if (!info || OWNER_CHAT_IDS.includes(info.chatId)) return null;
+  const idx = recentFriendSenders.findIndex(x => x.chatId === info.chatId);
+  if (idx >= 0) recentFriendSenders.splice(idx, 1);
+  recentFriendSenders.unshift(info);
+  if (recentFriendSenders.length > 25) recentFriendSenders.length = 25;
+  const existing = getFriend(info.chatId);
+  if (existing && info.name && !existing.name) {
+    existing.name = info.name;
+    saveFriends(true);
+  }
+  return info;
+}
+function getRecipientChatIds() {
+  const ids = new Set(OWNER_CHAT_IDS);
+  for (const f of friendsList) {
+    if (f && f.id && !OWNER_CHAT_IDS.includes(f.id)) ids.add(f.id);
+  }
+  return [...ids];
+}
 loadTelegramConfig();
+loadFriends();
 
 /* ---------- persistent alert deduplication ---------- */
 const ALERTS_FILE = path.join(DATA, 'sent_alerts.json');
@@ -131,8 +252,9 @@ let lastSentHash = '';
 let lastSentTime = 0;
 
 function sendTelegramSingle(token, chatId, text) {
+  const cleanId = String(chatId || '').trim();
   const postData = JSON.stringify({
-    chat_id: chatId,
+    chat_id: cleanId,
     text: text,
     parse_mode: 'HTML',
     disable_web_page_preview: true
@@ -151,45 +273,151 @@ function sendTelegramSingle(token, chatId, text) {
       res.on('end', () => {
         try {
           const j = JSON.parse(d);
-          if (j && j.ok) ok({ ok: true, result: j.result });
-          else ok({ ok: false, error: (j && j.description) || 'Telegram error' });
-        } catch (e) { ok({ ok: false, error: 'Invalid response from Telegram' }); }
+          if (j && j.ok) ok({ ok: true, chatId: cleanId, result: j.result });
+          else ok({ ok: false, chatId: cleanId, error: (j && j.description) || 'Telegram error' });
+        } catch (e) { ok({ ok: false, chatId: cleanId, error: 'Invalid response from Telegram' }); }
       });
     });
-    req.on('error', e => ok({ ok: false, error: e.message }));
-    req.setTimeout(8000, () => { req.destroy(); ok({ ok: false, error: 'Telegram request timeout' }); });
+    req.on('error', e => ok({ ok: false, chatId: cleanId, error: e.message }));
+    req.setTimeout(8000, () => { req.destroy(); ok({ ok: false, chatId: cleanId, error: 'Telegram request timeout' }); });
     req.write(postData);
     req.end();
   });
 }
 
-async function sendTelegram(text, customToken, customChatId) {
+function isTelegramUnreachableError(err) {
+  return /chat not found|bot was blocked|user is deactivated|initiate conversation|forbidden/i.test(String(err || ''));
+}
+
+function buildFriendWelcomeMessage() {
+  return [
+    '👋 <b>Welcome to TradeX!</b>',
+    '━━━━━━━━━━━━━━━━━━━━━',
+    'Built by <b>Dhruv</b>, <b>TradeX</b> is a real-time algorithmic trading terminal &amp; cloud alert engine for Indian markets (<b>NIFTY 50</b> &amp; <b>BANK NIFTY</b>).',
+    '',
+    '<b>What TradeX does:</b>',
+    '• 📡 Streams live market data &amp; runs Pine Script strategies 24/7 on the cloud',
+    '• ⚡ Sends instant <b>BUY / SELL entries</b>, trailing <b>SL / TP exits</b> &amp; PnL updates',
+    '• 🔔 Delivers Market Open (09:15 IST) &amp; Close (15:30 IST) position summaries',
+    '• 📊 Interactive commands right here on Telegram:',
+    '   – /info — Active open trades &amp; running strategies',
+    '   – /status — Market status &amp; live index prices',
+    '   – /help — Commands guide',
+    '━━━━━━━━━━━━━━━━━━━━━',
+    '🚀 Your Telegram is now linked to live TradeX alerts!'
+  ].join('\n');
+}
+
+async function sendFriendWelcomeIfNeeded(chatId, customToken, msgContext) {
+  const clean = isValidChatId(chatId);
+  if (!clean || OWNER_CHAT_IDS.includes(clean)) return { ok: true, sent: false, skipped: 'owner' };
+  const token = customToken || telegramConfig.token;
+  if (!token) return { ok: false, sent: false, chatId: clean, error: 'Bot token is missing' };
+  const friend = getFriend(clean);
+  if (!friend) return { ok: false, sent: false, chatId: clean, error: 'Friend not registered' };
+  if (friend.welcomed) return { ok: true, sent: false, chatId: clean, alreadyWelcomed: true, name: friend.name };
+
+  if (welcomeInFlight.has(clean)) return welcomeInFlight.get(clean);
+  const p = (async () => {
+    try {
+      const r = await sendTelegramSingle(token, clean, buildFriendWelcomeMessage());
+      if (r.ok) {
+        const chatMeta = (r.result && r.result.chat) || {};
+        const learnedName = `${chatMeta.first_name || ''} ${chatMeta.last_name || ''}`.trim()
+          || String(chatMeta.title || '').trim()
+          || (msgContext && extractTgSenderInfo(msgContext) ? extractTgSenderInfo(msgContext).name : '');
+        friend.welcomed = true;
+        if (learnedName && !friend.name) friend.name = learnedName;
+        saveFriends(true);
+        return { ok: true, sent: true, chatId: clean, name: friend.name };
+      }
+      return {
+        ok: false,
+        sent: false,
+        chatId: clean,
+        needsStart: isTelegramUnreachableError(r.error),
+        error: r.error || 'Telegram error'
+      };
+    } finally {
+      welcomeInFlight.delete(clean);
+    }
+  })();
+  welcomeInFlight.set(clean, p);
+  return p;
+}
+
+async function sendTelegram(text, customToken, customChatId, skipThrottle = false) {
   const token = customToken || telegramConfig.token;
   const targets = customChatId
     ? String(customChatId).split(',').map(s => s.trim()).filter(s => /^-?\d+$/.test(s))
     : getRecipientChatIds();
   if (!token || !targets.length) return { ok: false, error: 'Bot token or Chat ID is missing' };
 
-  // Safety net throttle: never deliver identical text within 45 seconds
+  // Safety net throttle: never deliver identical alert text within 45 seconds
   const h = String(text || '').trim();
   const now = Date.now();
-  if (h && h === lastSentHash && now - lastSentTime < 45000) {
+  if (!skipThrottle && h && h === lastSentHash && now - lastSentTime < 45000) {
     return { ok: true, skipped: 'duplicate_throttle' };
   }
-  lastSentHash = h;
-  lastSentTime = now;
+  if (!skipThrottle) {
+    lastSentHash = h;
+    lastSentTime = now;
+  }
 
-  const results = await Promise.all(targets.map(cid => sendTelegramSingle(token, cid, text)));
+  const results = await Promise.all(targets.map(async cid => {
+    const friend = getFriend(cid);
+    if (friend && !friend.welcomed) {
+      const wr = await sendFriendWelcomeIfNeeded(cid, token);
+      if (!wr.ok) {
+        return { ok: false, chatId: cid, needsStart: !!wr.needsStart, error: wr.error || 'Failed to send welcome message' };
+      }
+    }
+    return sendTelegramSingle(token, cid, text);
+  }));
   const firstOk = results.find(r => r.ok);
   if (firstOk) return { ok: true, result: firstOk.result, results };
-  return results[0] || { ok: false, error: 'Failed to send' };
+  return results[0] || { ok: false, error: 'Failed to send', results };
 }
 
 async function detectTelegramChatId(customToken) {
   const token = customToken || telegramConfig.token;
   if (!token) return { ok: false, error: 'Bot token is missing' };
+
+  if (!customToken) {
+    if (tgPollingActive) {
+      const deadline = Date.now() + 3500;
+      while (tgPollingActive && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 120));
+      }
+    }
+    if (!tgPollingActive) {
+      await pollTelegramUpdates(0, true);
+    }
+    const freshSender = recentFriendSenders.find(s => !getFriend(s.chatId));
+    if (freshSender) {
+      return {
+        ok: true,
+        chatId: freshSender.chatId,
+        name: freshSender.name,
+        username: freshSender.username,
+        alreadyAdded: false
+      };
+    }
+    if (recentFriendSenders.length) {
+      const latest = recentFriendSenders[0];
+      return {
+        ok: true,
+        chatId: latest.chatId,
+        name: latest.name,
+        username: latest.username,
+        alreadyAdded: !!getFriend(latest.chatId)
+      };
+    }
+    return { ok: false, error: 'No friend messages found yet. Ask your friend to open @TradeX_terminal_bot in Telegram and tap Start!' };
+  }
+
   return new Promise(ok => {
-    https.get(`https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates`, res => {
+    const req = https.get(`https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates`, res => {
       let d = ''; res.on('data', c => d += c);
       res.on('end', () => {
         try {
@@ -199,15 +427,23 @@ async function detectTelegramChatId(customToken) {
           for (let i = updates.length - 1; i >= 0; i--) {
             const m = updates[i].message || updates[i].channel_post;
             if (m && m.chat && m.chat.id) {
-              const detected = String(m.chat.id);
-              if (OWNER_CHAT_IDS.includes(detected)) continue;
-              return ok({ ok: true, chatId: detected, name: m.from ? `${m.from.first_name || ''} ${m.from.last_name || ''}`.trim() : '' });
+              const info = extractTgSenderInfo(m);
+              if (!info || OWNER_CHAT_IDS.includes(info.chatId)) continue;
+              return ok({
+                ok: true,
+                chatId: info.chatId,
+                name: info.name,
+                username: info.username,
+                alreadyAdded: !!getFriend(info.chatId)
+              });
             }
           }
           return ok({ ok: false, error: 'No friend messages found yet. Ask your friend to open @TradeX_terminal_bot in Telegram and tap Start!' });
         } catch (e) { ok({ ok: false, error: e.message }); }
       });
-    }).on('error', e => ok({ ok: false, error: e.message }));
+    });
+    req.on('error', e => ok({ ok: false, error: e.message }));
+    req.setTimeout(8000, () => { req.destroy(); ok({ ok: false, error: 'Telegram request timeout' }); });
   });
 }
 
@@ -358,17 +594,21 @@ function saveCloudStrats() {
       createdAt: s.createdAt || Date.now()
     }));
     fs.writeFileSync(CLOUD_STRATS_FILE, JSON.stringify(clean, null, 2));
-    queueGitHubSync();
+    queueGitHubSync('strats');
   } catch (e) { log('Cloud strats save error:', e.message); }
 }
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const GITHUB_REPO = process.env.GITHUB_REPO || 'DhruvKaunHai/tradex';
-let syncGhTimer = null;
-async function syncCloudStratsToGitHub() {
-  if (!GITHUB_TOKEN || !GITHUB_REPO || !fs.existsSync(CLOUD_STRATS_FILE)) return;
+const GITHUB_SYNC_TARGETS = {
+  strats: { file: CLOUD_STRATS_FILE, repoPath: 'data/cloud_strats.json', message: 'Auto-sync cloud strategies' },
+  friends: { file: FRIENDS_FILE, repoPath: 'data/friends.json', message: 'Auto-sync Telegram friends' }
+};
+const syncGhTimers = {};
+async function syncFileToGitHub(filePath, repoPath, commitMsg) {
+  if (!GITHUB_TOKEN || !GITHUB_REPO || !fs.existsSync(filePath)) return;
   try {
-    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/data/cloud_strats.json`;
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${repoPath}`;
     const headers = {
       'Authorization': `Bearer ${GITHUB_TOKEN}`,
       'User-Agent': 'TradeX-Server',
@@ -380,26 +620,29 @@ async function syncCloudStratsToGitHub() {
       const curData = await curRes.json();
       sha = curData.sha;
     }
-    const content = fs.readFileSync(CLOUD_STRATS_FILE, 'utf8');
+    const content = fs.readFileSync(filePath, 'utf8');
     const putRes = await fetch(url, {
       method: 'PUT',
       headers,
       body: JSON.stringify({
-        message: 'Auto-sync cloud strategies',
+        message: commitMsg,
         content: Buffer.from(content).toString('base64'),
         sha: sha || undefined,
         branch: 'main'
       })
     });
-    if (putRes.ok) log('Synced cloud strategies to GitHub repository');
-    else log('GitHub sync status:', putRes.status);
+    if (putRes.ok) log(`Synced ${repoPath} to GitHub repository`);
+    else log(`GitHub sync status (${repoPath}):`, putRes.status);
   } catch (err) {
-    log('GitHub sync error:', err.message);
+    log(`GitHub sync error (${repoPath}):`, err.message);
   }
 }
-function queueGitHubSync() {
-  if (syncGhTimer) clearTimeout(syncGhTimer);
-  syncGhTimer = setTimeout(syncCloudStratsToGitHub, 15000);
+function queueGitHubSync(kind = 'strats') {
+  const target = GITHUB_SYNC_TARGETS[kind] || GITHUB_SYNC_TARGETS.strats;
+  if (syncGhTimers[kind]) clearTimeout(syncGhTimers[kind]);
+  syncGhTimers[kind] = setTimeout(() => {
+    syncFileToGitHub(target.file, target.repoPath, target.message);
+  }, 15000);
 }
 loadCloudStrats();
 
@@ -786,35 +1029,134 @@ const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://x'), p = u.pathname;
     if (req.method === 'OPTIONS') return send(req, res, 204, '');
     if (p === '/api/status') return send(req, res, 200, { ok: true, marketOpen: marketOpenNow(), serverTime: Math.floor(Date.now() / 1000), pollMs: POLL_MS, symbols: Object.keys(SYMBOLS).map(statusOf) }, null, { 'Cache-Control': 'no-store' });
+    const publicTgConfig = () => ({
+      ownerActive: OWNER_CHAT_IDS.length > 0,
+      extraChatIds: friendsList.map(f => f.id),
+      friends: friendsList.map(f => ({ id: f.id, name: f.name || '', welcomed: !!f.welcomed })),
+      enabled: telegramConfig.enabled,
+      notifyEntries: telegramConfig.notifyEntries,
+      notifyExits: telegramConfig.notifyExits,
+      notifyMarket: telegramConfig.notifyMarket,
+      configured: !!telegramConfig.token
+    });
+    const sanitizeTgSendResult = (r) => {
+      if (!r || !Array.isArray(r.results)) {
+        return {
+          ok: !!(r && r.ok),
+          skipped: r ? r.skipped : undefined,
+          error: r && !r.ok ? (r.error || 'Failed to send') : undefined,
+          ownerOk: false,
+          ownerError: r && !r.ok ? (r.error || 'Failed to send') : null,
+          friendResults: []
+        };
+      }
+      let hasOwner = false, ownerOk = false, ownerError = null;
+      const friendResults = [];
+      for (const item of r.results) {
+        if (OWNER_CHAT_IDS.includes(item.chatId)) {
+          hasOwner = true;
+          if (item.ok) ownerOk = true;
+          else if (!ownerError) ownerError = item.error || 'Telegram error';
+        } else {
+          const fr = getFriend(item.chatId);
+          friendResults.push({
+            chatId: item.chatId,
+            name: fr ? fr.name : '',
+            ok: !!item.ok,
+            needsStart: !!item.needsStart,
+            error: item.ok ? null : (item.error || 'Telegram error')
+          });
+        }
+      }
+      if (hasOwner && ownerOk) ownerError = null;
+      const allDelivered = (!hasOwner || ownerOk) && friendResults.every(f => f.ok);
+      return {
+        ok: !!(ownerOk || friendResults.some(f => f.ok)),
+        allDelivered,
+        ownerOk: hasOwner ? ownerOk : undefined,
+        ownerError: hasOwner ? ownerError : undefined,
+        friendResults,
+        error: !(ownerOk || friendResults.some(f => f.ok)) ? (ownerError || (friendResults[0] && friendResults[0].error) || r.error || 'Failed to send') : undefined
+      };
+    };
+
     if (p === '/api/telegram/config') {
-      const publicConfig = () => ({
-        ownerActive: OWNER_CHAT_IDS.length > 0,
-        extraChatIds: telegramConfig.extraChatIds || [],
-        enabled: telegramConfig.enabled,
-        notifyEntries: telegramConfig.notifyEntries,
-        notifyExits: telegramConfig.notifyExits,
-        notifyMarket: telegramConfig.notifyMarket,
-        configured: !!telegramConfig.token
-      });
       if (req.method === 'POST') {
         const body = JSON.parse(await readBody(req));
         if (body.token) telegramConfig.token = String(body.token).trim();
+        const newlyAddedFriends = [];
         if (body.extraChatIds !== undefined) {
           const raw = Array.isArray(body.extraChatIds)
             ? body.extraChatIds
             : String(body.extraChatIds || '').split(',');
-          telegramConfig.extraChatIds = [...new Set(
+          const nextIds = [...new Set(
             raw.map(s => String(s || '').trim()).filter(s => /^-?\d+$/.test(s) && !OWNER_CHAT_IDS.includes(s))
           )];
+          const byOldId = new Map(friendsList.map(f => [f.id, f]));
+          friendsList = nextIds.map(id => {
+            if (byOldId.has(id)) return byOldId.get(id);
+            const known = recentFriendSenders.find(s => s.chatId === id);
+            newlyAddedFriends.push(id);
+            return { id, name: known ? known.name : '', welcomed: false };
+          });
+          saveFriends(true);
         }
         if (body.enabled !== undefined) telegramConfig.enabled = !!body.enabled;
         if (body.notifyEntries !== undefined) telegramConfig.notifyEntries = !!body.notifyEntries;
         if (body.notifyExits !== undefined) telegramConfig.notifyExits = !!body.notifyExits;
         if (body.notifyMarket !== undefined) telegramConfig.notifyMarket = !!body.notifyMarket;
         saveTelegramConfig();
-        return send(req, res, 200, { ok: true, config: publicConfig() });
+        for (const fid of newlyAddedFriends) {
+          await sendFriendWelcomeIfNeeded(fid);
+        }
+        return send(req, res, 200, { ok: true, config: publicTgConfig() });
       }
-      return send(req, res, 200, { ok: true, config: publicConfig() });
+      return send(req, res, 200, { ok: true, config: publicTgConfig() });
+    }
+    if (p === '/api/telegram/friends/add' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      const rawInput = body.chatIds !== undefined ? body.chatIds : body.chatId;
+      const tokens = Array.isArray(rawInput)
+        ? rawInput.map(s => String(s || '').trim()).filter(Boolean)
+        : String(rawInput || '').split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+      if (!tokens.length) {
+        return send(req, res, 400, { ok: false, error: 'Please enter a valid numeric Telegram Chat ID.', config: publicTgConfig() });
+      }
+      const invalid = tokens.filter(t => !/^-?\d+$/.test(t));
+      if (invalid.length) {
+        return send(req, res, 400, { ok: false, error: `Invalid Telegram Chat ID "${invalid[0]}". Use digits only (or click Auto-Detect Friend ID).`, config: publicTgConfig() });
+      }
+      const friendIds = [...new Set(tokens.filter(t => !OWNER_CHAT_IDS.includes(t)))];
+      if (!friendIds.length) {
+        return send(req, res, 400, { ok: false, error: 'That is the Owner Telegram ID, which is already active and locked on the server.', config: publicTgConfig() });
+      }
+      const results = [];
+      for (const id of friendIds) {
+        const known = recentFriendSenders.find(s => s.chatId === id);
+        const hintName = friendIds.length === 1 && body.name ? String(body.name).trim() : (known ? known.name : '');
+        const { friend, added } = upsertFriend(id, { name: hintName });
+        const wr = await sendFriendWelcomeIfNeeded(id);
+        results.push({
+          chatId: id,
+          name: (friend && friend.name) || '',
+          added,
+          welcomed: !!(friend && friend.welcomed),
+          welcomeSent: !!wr.sent,
+          needsStart: !!wr.needsStart,
+          error: wr.ok ? null : (wr.error || 'Could not reach Telegram chat')
+        });
+      }
+      return send(req, res, 200, { ok: true, config: publicTgConfig(), results });
+    }
+    if (p === '/api/telegram/friends/remove' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req));
+      const cid = isValidChatId(body.chatId);
+      if (!cid) return send(req, res, 400, { ok: false, error: 'Invalid Telegram Chat ID.', config: publicTgConfig() });
+      if (OWNER_CHAT_IDS.includes(cid)) {
+        return send(req, res, 403, { ok: false, error: 'Owner Telegram ID is locked on the server and cannot be removed.', config: publicTgConfig() });
+      }
+      const removed = removeFriendById(cid);
+      return send(req, res, 200, { ok: true, removed, config: publicTgConfig() });
     }
     if (p === '/api/telegram/detect') {
       const r = await detectTelegramChatId();
@@ -824,10 +1166,10 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse(await readBody(req));
       const targetChat = body.chatId ? String(body.chatId).trim() : null;
       const d = new Date(Date.now() + IST * 1000);
-      let h = d.getUTCHours(), m = d.getUTCMinutes();
+      let h = d.getUTCHours(), m = d.getUTCMinutes(), sec = d.getUTCSeconds();
       const ap = h >= 12 ? 'PM' : 'AM';
       h = h % 12; if (!h) h = 12;
-      const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ap}`;
+      const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')} ${ap}`;
       const text = [
         '🔔 <b>TRADEX NOTIFICATION TEST</b>',
         '━━━━━━━━━━━━━━━━━━━━━',
@@ -835,8 +1177,8 @@ const server = http.createServer(async (req, res) => {
         '📈 Live alerts for BUY / SELL entries, trade exits, and market open/close summaries are active.',
         `⏰ Time: ${timeStr} IST`
       ].join('\n');
-      const r = await sendTelegram(text, null, targetChat);
-      return send(req, res, 200, r);
+      const r = await sendTelegram(text, null, targetChat, true);
+      return send(req, res, 200, sanitizeTgSendResult(r));
     }
     if (p === '/api/telegram/send' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req));
@@ -850,7 +1192,7 @@ const server = http.createServer(async (req, res) => {
         recordSentAlert(body.key);
       }
       const r = await sendTelegram(body.text);
-      return send(req, res, 200, r);
+      return send(req, res, 200, sanitizeTgSendResult(r));
     }
     if (p === '/api/cloud-strats') {
       if (req.method === 'POST') {
@@ -945,31 +1287,45 @@ const server = http.createServer(async (req, res) => {
 let tgPollOffset = 0;
 let tgPollingActive = false;
 
-async function pollTelegramUpdates() {
+async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
   const token = telegramConfig.token;
-  if (!token || !telegramConfig.enabled || tgPollingActive) return;
+  if (!token || (!allowWhenDisabled && !telegramConfig.enabled) || tgPollingActive) return;
   tgPollingActive = true;
   try {
-    const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates?offset=${tgPollOffset}&timeout=5`;
+    const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates?offset=${tgPollOffset}&timeout=${timeoutSec}`;
     const res = await new Promise(ok => {
-      https.get(url, r => {
+      const req = https.get(url, r => {
         let d = ''; r.on('data', c => d += c);
         r.on('end', () => {
           try { ok(JSON.parse(d)); } catch (_) { ok(null); }
         });
-      }).on('error', () => ok(null));
+      });
+      req.on('error', () => ok(null));
+      req.setTimeout((timeoutSec + 6) * 1000, () => { req.destroy(); ok(null); });
     });
 
     if (res && res.ok && Array.isArray(res.result)) {
       for (const u of res.result) {
         if (u.update_id >= tgPollOffset) tgPollOffset = u.update_id + 1;
-        const msg = u.message;
-        if (!msg || !msg.text || !msg.chat || !msg.chat.id) continue;
+        if (u.my_chat_member && u.my_chat_member.chat) {
+          recordFriendSender({ chat: u.my_chat_member.chat, from: u.my_chat_member.from });
+        }
+        const msg = u.message || u.channel_post;
+        if (!msg || !msg.chat || !msg.chat.id) continue;
+        recordFriendSender(msg); // preserve sender for Auto-Detect before recipient filter
         const chatId = String(msg.chat.id);
         const recipients = getRecipientChatIds();
         if (!recipients.includes(chatId)) continue; // security: only answer authorized recipients
 
-        const text = String(msg.text).trim().toLowerCase();
+        const rawText = msg.text ? String(msg.text).trim() : '';
+        const text = rawText ? rawText.split(/\s+/)[0].toLowerCase().replace(/@\w+$/, '') : '';
+        const friend = getFriend(chatId);
+        if (friend && !friend.welcomed) {
+          await sendFriendWelcomeIfNeeded(chatId, token, msg);
+          if (!text || text === '/start') continue;
+        }
+        if (!text) continue;
+        if (msg.date && msg.date < serverBootSec - 300) continue;
         if (text === '/info' || text === '/trades' || text === 'info') {
           const openTrades = getOpenCloudTrades();
           const d = new Date(Date.now() + IST * 1000);
@@ -1072,8 +1428,10 @@ async function boot() {
   setInterval(() => { for (const sym in SYMBOLS) save(sym); }, 60000);
   setInterval(() => broadcast({ type: 'ping', marketOpen: marketOpenNow() }), 15000);
   setInterval(() => { for (const sym in SYMBOLS) yahooHistory(sym); }, 6 * 3600 * 1000);
-  setInterval(pollTelegramUpdates, 4000);
-  pollTelegramUpdates();
+  const scheduleTgPoll = () => {
+    pollTelegramUpdates(2).finally(() => setTimeout(scheduleTgPoll, 1500));
+  };
+  scheduleTgPoll();
 }
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { for (const sym in SYMBOLS) save(sym); process.exit(0); });
 boot();
