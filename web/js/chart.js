@@ -13,14 +13,17 @@ class TXChart {
     this.vel = 0; this.anim = null; this.dirty = false; this.follow = true; this.subH = 0; this.hit = [];
     this.tickDir = 0; this.lastTickTime = 0; this.pulseTimer = null;
     this.yScale = 1.0; this.yOffset = 0; this.dragMode = null; this.autoBtnRect = null;
+    this.touchCross = false; this._crossDirty = false; this._rect = null;
     setInterval(() => { if (this.d && this.n && this.tf && !this.pulseTimer) this.draw(); }, 1000);
     new ResizeObserver(() => this.resize()).observe(el); this.bind(); this.theme(); this.resize();
   }
   on(ev, fn) { this.h[ev] = fn; return this; }
   emit(ev, a) { if (this.h[ev]) this.h[ev](a); }
   theme() { const cs = getComputedStyle(this.el), g = k => cs.getPropertyValue(k).trim(); this.col = { bg: g('--surface') || '#15131c', grid: g('--line') || '#262233', text: g('--text') || '#eee', muted: g('--muted') || '#888', up: g('--up') || '#35d6ae', down: g('--down') || '#ff5f7a', accent: g('--accent') || '#ffb224', blue: '#2962ff', font: g('--font') || 'sans-serif' }; this.draw(); }
-  resize() { const r = this.el.getBoundingClientRect(), dpr = window.devicePixelRatio || 1; if (!r.width || !r.height) return; this.W = r.width; this.H = r.height; this.cv.width = Math.round(r.width * dpr); this.cv.height = Math.round(r.height * dpr); this.cv.style.width = r.width + 'px'; this.cv.style.height = r.height + 'px'; this.dpr = dpr; this.clamp(); this.draw(); }
-  get pw() { return this.W - AXW; }
+  resize() { const r = this.el.getBoundingClientRect(), rawDpr = window.devicePixelRatio || 1, dpr = window.innerWidth <= 900 ? Math.min(rawDpr, 2) : rawDpr; if (!r.width || !r.height) return; this._rect = r; this.W = r.width; this.H = r.height; this.cv.width = Math.round(r.width * dpr); this.cv.height = Math.round(r.height * dpr); this.cv.style.width = r.width + 'px'; this.cv.style.height = r.height + 'px'; this.dpr = dpr; this.clamp(); this.draw(); }
+  get axw() { return this.W && this.W < 640 ? 64 : AXW; }
+  get pw() { return this.W - this.axw; }
+  setTouchCross(on) { this.touchCross = !!on; if (!this.touchCross) { this.cross = null; this._crossDirty = true; this.draw(); } }
   setData(d, tf, keepView) {
     const first = !this.d || !keepView; this.d = d; this.n = d.t.length; this.tf = tf;
     this.rank = new Uint8Array(this.n); let pd = null;
@@ -86,7 +89,12 @@ class TXChart {
   }
   bind() {
     const cv = this.cv, pts = new Map();
-    let lastX = 0, lastY = 0, lastT = 0, pinch = 0, moved = 0;
+    let lastX = 0, lastY = 0, lastT = 0, pinch = 0, pinchMid = 0, moved = 0, lpTimer = 0, lpActivated = false, hadCross = null;
+    const ptXY = e => {
+      if (e.pointerType !== 'touch' && Number.isFinite(e.offsetX)) return { x: e.offsetX, y: e.offsetY };
+      const r = this._rect || (this._rect = cv.getBoundingClientRect());
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    };
 
     cv.addEventListener('wheel', e => {
       e.preventDefault(); cancelAnimationFrame(this.anim);
@@ -117,45 +125,89 @@ class TXChart {
     }, { passive: false });
 
     cv.addEventListener('pointerdown', e => {
+      const isTouch = e.pointerType === 'touch';
+      const p = ptXY(e);
+      if (isTouch) this._rect = cv.getBoundingClientRect();
       cv.setPointerCapture(e.pointerId);
-      pts.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
-      lastX = e.offsetX; lastY = e.offsetY; lastT = e.timeStamp;
-      this.vel = 0; moved = 0; cancelAnimationFrame(this.anim);
+      pts.set(e.pointerId, p);
+      lastX = p.x; lastY = p.y; lastT = e.timeStamp;
+      this.vel = 0; moved = 0; lpActivated = false;
+      hadCross = isTouch && this.cross ? { x: this.cross.x, y: this.cross.y } : null;
+      clearTimeout(lpTimer);
+      cancelAnimationFrame(this.anim);
 
       if (pts.size === 1) {
-        if (this.autoBtnRect && e.offsetX >= this.autoBtnRect.x && e.offsetX <= this.autoBtnRect.x + this.autoBtnRect.w &&
-            e.offsetY >= this.autoBtnRect.y && e.offsetY <= this.autoBtnRect.y + this.autoBtnRect.h) {
+        const pad = isTouch ? 8 : 0;
+        if (this.autoBtnRect && p.x >= this.autoBtnRect.x - pad && p.x <= this.autoBtnRect.x + this.autoBtnRect.w + pad &&
+            p.y >= this.autoBtnRect.y - pad && p.y <= this.autoBtnRect.y + this.autoBtnRect.h + pad) {
           this.yScale = 1.0; this.yOffset = 0; this.draw();
           return;
         }
-        if (e.offsetX >= this.pw && e.offsetY < this.mainH) {
+        if (p.x >= this.pw && p.y < this.mainH) {
           this.dragMode = 'price';
           cv.style.cursor = 'ns-resize';
-        } else if (e.offsetY >= this.H - AXH && e.offsetX < this.pw) {
+        } else if (p.y >= this.H - AXH && p.x < this.pw) {
           this.dragMode = 'time';
           cv.style.cursor = 'ew-resize';
+        } else if (isTouch && this.touchCross) {
+          this.dragMode = 'cross';
+          this.cross = { x: Math.max(0, Math.min(this.pw - 1, p.x)), y: Math.max(0, Math.min(this.H - AXH - 1, p.y)) };
+          this._crossDirty = true;
+          this.draw();
         } else {
           this.dragMode = 'chart';
           cv.style.cursor = 'grabbing';
+          if (isTouch) {
+            if (this.cross) { this.cross = null; this._crossDirty = true; this.draw(); }
+            lpTimer = setTimeout(() => {
+              if (pts.size === 1 && moved < 8 && this.dragMode === 'chart') {
+                lpActivated = true;
+                this.dragMode = 'cross';
+                const cur = [...pts.values()][0] || p;
+                this.cross = { x: Math.max(0, Math.min(this.pw - 1, cur.x)), y: Math.max(0, Math.min(this.H - AXH - 1, cur.y)) };
+                this._crossDirty = true;
+                this.draw();
+                if (navigator.vibrate) try { navigator.vibrate(10); } catch (_) {}
+              }
+            }, 210);
+          }
         }
       } else if (pts.size === 2) {
         const v = [...pts.values()];
         pinch = Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y);
+        pinchMid = (v[0].x + v[1].x) / 2;
         this.dragMode = 'pinch';
+        if (isTouch && this.cross) { this.cross = null; this._crossDirty = true; }
       }
     });
 
     cv.addEventListener('pointermove', e => {
+      const isTouch = e.pointerType === 'touch';
+      const p = ptXY(e);
       if (pts.has(e.pointerId)) {
-        pts.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+        pts.set(e.pointerId, p);
         if (this.dragMode === 'pinch' && pts.size === 2) {
-          const v = [...pts.values()], dist = Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y);
-          if (pinch > 10 && dist > 10) this.zoom(dist / pinch, (v[0].x + v[1].x) / 2);
-          pinch = dist; return;
+          const v = [...pts.values()];
+          const dist = Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y);
+          const mid = (v[0].x + v[1].x) / 2;
+          if (pinch > 10 && dist > 10) {
+            this.right -= (mid - pinchMid) / this.bw;
+            this.zoom(dist / pinch, mid);
+          }
+          pinch = dist; pinchMid = mid; return;
         }
-        const dx = e.offsetX - lastX, dy = e.offsetY - lastY;
+        if (this.dragMode === 'cross') {
+          moved += Math.hypot(p.x - lastX, p.y - lastY);
+          this.cross = { x: Math.max(0, Math.min(this.pw - 1, p.x)), y: Math.max(0, Math.min(this.H - AXH - 1, p.y)) };
+          this._crossDirty = true;
+          this.draw();
+          lastX = p.x; lastY = p.y; lastT = e.timeStamp;
+          return;
+        }
+        const dx = p.x - lastX, dy = p.y - lastY;
         const dtm = Math.max(1, e.timeStamp - lastT);
         moved += Math.hypot(dx, dy);
+        if (moved >= 8) clearTimeout(lpTimer);
 
         if (this.dragMode === 'price') {
           // Drag up (dy < 0): zoom in (stretch candles). Drag down (dy > 0): zoom out (squash candles).
@@ -176,48 +228,72 @@ class TXChart {
           this.clamp();
           this.draw();
         }
-        lastX = e.offsetX; lastY = e.offsetY; lastT = e.timeStamp;
-      } else {
+        lastX = p.x; lastY = p.y; lastT = e.timeStamp;
+        if (isTouch) return;
+      } else if (!isTouch) {
         // Hover cursors
-        if (this.autoBtnRect && e.offsetX >= this.autoBtnRect.x && e.offsetX <= this.autoBtnRect.x + this.autoBtnRect.w &&
-            e.offsetY >= this.autoBtnRect.y && e.offsetY <= this.autoBtnRect.y + this.autoBtnRect.h) {
+        if (this.autoBtnRect && p.x >= this.autoBtnRect.x && p.x <= this.autoBtnRect.x + this.autoBtnRect.w &&
+            p.y >= this.autoBtnRect.y && p.y <= this.autoBtnRect.y + this.autoBtnRect.h) {
           cv.style.cursor = 'pointer';
-        } else if (e.offsetX >= this.pw && e.offsetY < this.mainH) {
+        } else if (p.x >= this.pw && p.y < this.mainH) {
           cv.style.cursor = 'ns-resize';
-        } else if (e.offsetY >= this.H - AXH && e.offsetX < this.pw) {
+        } else if (p.y >= this.H - AXH && p.x < this.pw) {
           cv.style.cursor = 'ew-resize';
         } else {
           cv.style.cursor = 'crosshair';
         }
       }
-      this.cross = { x: e.offsetX, y: e.offsetY };
-      this.draw();
-      this.emitCross();
+      if (!isTouch) {
+        this.cross = { x: p.x, y: p.y };
+        this._crossDirty = true;
+        this.draw();
+      }
     });
 
     const up = e => {
+      clearTimeout(lpTimer);
       if (!pts.has(e.pointerId)) return;
+      const isTouch = e.pointerType === 'touch';
+      const p = ptXY(e);
       pts.delete(e.pointerId);
       const wasMode = this.dragMode;
+
+      if (wasMode === 'pinch' && pts.size === 1) {
+        const rem = [...pts.values()][0];
+        lastX = rem.x; lastY = rem.y; lastT = e.timeStamp;
+        this.vel = 0; moved = 99;
+        this.dragMode = 'chart';
+        return;
+      }
+
       this.dragMode = null;
 
-      if (e.offsetX >= this.pw && e.offsetY < this.mainH) cv.style.cursor = 'ns-resize';
-      else if (e.offsetY >= this.H - AXH && e.offsetX < this.pw) cv.style.cursor = 'ew-resize';
+      if (p.x >= this.pw && p.y < this.mainH) cv.style.cursor = 'ns-resize';
+      else if (p.y >= this.H - AXH && p.x < this.pw) cv.style.cursor = 'ew-resize';
       else cv.style.cursor = 'crosshair';
 
-      if (moved < 5) {
-        if (this.autoBtnRect && e.offsetX >= this.autoBtnRect.x && e.offsetX <= this.autoBtnRect.x + this.autoBtnRect.w &&
-            e.offsetY >= this.autoBtnRect.y && e.offsetY <= this.autoBtnRect.y + this.autoBtnRect.h) {
+      const tapLim = isTouch ? 9 : 5;
+      const hitR = isTouch ? 18 : 9;
+      if (!lpActivated && moved < tapLim) {
+        const pad = isTouch ? 8 : 0;
+        if (this.autoBtnRect && p.x >= this.autoBtnRect.x - pad && p.x <= this.autoBtnRect.x + this.autoBtnRect.w + pad &&
+            p.y >= this.autoBtnRect.y - pad && p.y <= this.autoBtnRect.y + this.autoBtnRect.h + pad) {
           this.yScale = 1.0; this.yOffset = 0; this.draw(); return;
         }
-        const hit = this.hit.find(q => Math.abs(q.x - e.offsetX) < 9 && Math.abs(q.y - e.offsetY) < 11);
-        this.emit('click', { index: this.idx(e.offsetX), trade: hit ? hit.trade : null, layer: hit ? hit.layer : null });
+        const hit = this.hit.find(q => Math.abs(q.x - p.x) < hitR && Math.abs(q.y - p.y) < hitR + 2);
+        this.emit('click', { index: this.idx(p.x), trade: hit ? hit.trade : null, layer: hit ? hit.layer : null });
+        if (isTouch && p.x < this.pw && p.y < this.H - AXH) {
+          if (wasMode !== 'cross' && hadCross && Math.abs(hadCross.x - p.x) < 22 && !hit) this.cross = null;
+          else this.cross = { x: p.x, y: p.y };
+          this._crossDirty = true;
+          this.draw();
+        }
       } else if (wasMode === 'chart' && Math.abs(this.vel) > 0.25 && e.timeStamp - lastT < 60) {
         this.fling();
       }
     };
     cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
-    cv.addEventListener('pointerleave', () => { this.cross = null; this.draw(); this.emitCross(); });
+    cv.addEventListener('pointerleave', e => { if (e.pointerType !== 'touch') { this.cross = null; this._crossDirty = true; this.draw(); } });
     cv.addEventListener('dblclick', e => {
       if (e.offsetX >= this.pw && e.offsetY < this.mainH) {
         // Double-click on price axis: reset Y zoom/pan
@@ -239,7 +315,7 @@ class TXChart {
   }
   fling() { let v = this.vel * 16; const step = () => { v *= 0.93; this.right -= v / this.bw; this.clamp(); this.draw(); if (Math.abs(v) > 0.4) this.anim = requestAnimationFrame(step); }; this.anim = requestAnimationFrame(step); }
   emitCross() { if (!this.d) return; let i = this.cross ? this.idx(this.cross.x) : this.n - 1; i = Math.max(0, Math.min(this.n - 1, i)); this.emit('cross', { index: i, active: !!this.cross }); }
-  draw() { if (this.dirty) return; this.dirty = true; requestAnimationFrame(() => { this.dirty = false; this.paint(); const away = !!this.n && this.right < this.n - 1.5; if (away !== this._away) { this._away = away; this.emit('view', { away }); } }); }
+  draw() { if (this.dirty) return; this.dirty = true; requestAnimationFrame(() => { this.dirty = false; this.paint(); if (this._crossDirty) { this._crossDirty = false; this.emitCross(); } const away = !!this.n && this.right < this.n - 1.5; if (away !== this._away) { this._away = away; this.emit('view', { away }); } }); }
   paint() {
     const c = this.ctx, W = this.W, H = this.H, col = this.col, d = this.d; if (!W || !H) return;
     c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); c.fillStyle = col.bg; c.fillRect(0, 0, W, H);
@@ -330,22 +406,22 @@ class TXChart {
       c.fillText(shi.toFixed(shi > 1000 ? 0 : 2), pw + 8, sy0 + 4); c.fillText(slo.toFixed(slo > 1000 ? 0 : 2), pw + 8, sy0 + sh - 4); c.fillText(subs.map(L => L.name).join(', ').slice(0, 60), 8, top + 12);
     }
     // axes
-    c.fillStyle = col.bg; c.fillRect(pw, 0, AXW, mainH); c.fillRect(0, H - AXH, W, AXH);
+    c.fillStyle = col.bg; c.fillRect(pw, 0, this.axw, mainH); c.fillRect(0, H - AXH, W, AXH);
     c.strokeStyle = col.grid; c.beginPath(); c.moveTo(pw + 0.5, 0); c.lineTo(pw + 0.5, H - AXH); c.moveTo(0, H - AXH + 0.5); c.lineTo(W, H - AXH + 0.5); c.stroke();
     
     // Y-axis price labels: SKIP any label that overlaps with live badge or crosshair (NO TEXT COLLISION!)
-    c.fillStyle = col.muted; c.font = `11px ${col.font}`; c.textAlign = 'left'; c.textBaseline = 'middle';
+    c.fillStyle = col.muted; c.font = `${this.W < 640 ? 10 : 11}px ${col.font}`; c.textAlign = 'left'; c.textBaseline = 'middle';
     const crossY = (this.cross && this.cross.x < pw && this.cross.y < mainH) ? Math.round(this.cross.y) : -999;
     for (const [v, yy] of pticks) {
       if (ly > 0 && ly < mainH && yy >= ly - 24 && yy <= ly + 38) continue;
       if (crossY > 0 && Math.abs(yy - crossY) < 18) continue;
       const dec = ps < 1 ? 2 : (ps < 10 && v % 1 !== 0 ? 1 : 0);
-      c.fillText(v.toLocaleString('en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }), pw + 8, yy);
+      c.fillText(v.toLocaleString('en-IN', { minimumFractionDigits: dec, maximumFractionDigits: dec }), pw + 6, yy);
     }
     c.textAlign = 'center';
     for (const [i, xx] of tt) { if (xx < 20 || xx > pw - 20) continue; const x = new Date((d.t[i] + IST) * 1000), r = this.rank[i]; const txt = r >= 4 ? String(x.getUTCFullYear()) : r === 3 ? (lvl >= 3 ? MON[x.getUTCMonth()] + (x.getUTCMonth() === 0 ? ' ' + x.getUTCFullYear() : '') : x.getUTCDate() + ' ' + MON[x.getUTCMonth()]) : r === 2 ? x.getUTCDate() + ' ' + MON[x.getUTCMonth()] : fmtTime(d.t[i]); c.fillStyle = r >= 2 ? col.text : col.muted; c.fillText(txt, xx, H - AXH / 2); }
     
-    const tag = (yy, txt, bg, fg) => { c.fillStyle = bg; c.beginPath(); c.roundRect(pw + 1, yy - 10, AXW - 3, 20, 2); c.fill(); c.fillStyle = fg; c.textAlign = 'left'; c.font = `600 11px ${col.font}`; c.fillText(txt, pw + 7, yy + 0.5); };
+    const tag = (yy, txt, bg, fg) => { c.fillStyle = bg; c.beginPath(); c.roundRect(pw + 1, yy - 10, this.axw - 3, 20, 2); c.fill(); c.fillStyle = fg; c.textAlign = 'left'; c.font = `600 ${this.W < 640 ? 10 : 11}px ${col.font}`; c.fillText(txt, pw + 5, yy + 0.5); };
     
     // Live price badge on Y-axis
     if (ly > 0 && ly < mainH) {
@@ -375,7 +451,7 @@ class TXChart {
     // TradingView-style [Auto] button on price axis when manual Y-scaling or vertical panning is active
     const isManualY = (this.yScale && Math.abs(this.yScale - 1.0) > 0.02) || (this.yOffset && Math.abs(this.yOffset) > 0.5);
     if (isManualY) {
-      const bx = pw + 6, by = mainH - 24, bw = AXW - 12, bh = 18;
+      const bx = pw + 6, by = mainH - 24, bw = this.axw - 12, bh = 18;
       this.autoBtnRect = { x: bx, y: by, w: bw, h: bh };
       c.fillStyle = col.bg; c.strokeStyle = col.muted; c.lineWidth = 1;
       c.beginPath(); c.roundRect(bx, by, bw, bh, 3); c.fill(); c.stroke();

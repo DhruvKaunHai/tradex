@@ -37,10 +37,12 @@
         <div class="chart-host" id="chartHost"></div>
         <div class="legend" id="legend"></div>
         <div class="ranges" id="ranges"><button data-r="1">1D</button><button data-r="5">5D</button><button data-r="22">1M</button><button data-r="66">3M</button><button data-r="132">6M</button><button data-r="250">1Y</button><button data-r="0">All</button><input type="date" id="jump" aria-label="Go to date" title="Go to date"></div>
-        <button class="btn small dock-toggle" id="dockToggle">Strategies</button>
+        <button class="btn small dock-toggle" id="dockToggle" aria-expanded="false">Strategies</button>
+        <button class="btn small touch-cross-btn" id="touchCrossBtn" type="button" title="Toggle crosshair mode" aria-pressed="false" aria-label="Toggle crosshair mode">⌖</button>
         <button class="go-latest hide" id="goLatest" title="Go to the latest candle (End)" aria-label="Go to the latest candle"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 6 6 6-6 6M13 6l6 6-6 6"/></svg>Latest</button>
         <div id="tradeCard"></div>
       </div>
+      <div class="dock-backdrop hide" id="dockBackdrop" aria-hidden="true"></div>
       <aside class="dock" id="dock">
         <header>
           <div class="seg dock-seg" id="dockTabs">
@@ -51,6 +53,7 @@
           <div style="display:flex;gap:6px;align-items:center">
             <button class="btn small" id="dockSelectBtn" title="Select multiple strategies">Select</button>
             <button class="btn small primary" id="addStrat">Add</button>
+            <button class="icon-btn dock-close" id="dockClose" type="button" title="Close" aria-label="Close strategies">✕</button>
           </div>
         </header>
         <div id="dockBatchBar" class="dock-batch-bar hide">
@@ -80,7 +83,7 @@
         <div class="ed-status" style="position:relative"><i class="bar-prog" id="prog"></i><span class="msg" id="edMsg"></span><button class="btn small hide" id="openReport">Open full report</button><button class="btn small hide" id="showOnChart">Show on chart</button></div>
       </div>
       <aside class="ed-side">
-        <div class="tabs" id="sideTabs" role="tablist"><button data-p="lib" aria-selected="true">Library</button><button data-p="inputs">Inputs</button><button data-p="setup">Test setup</button><button data-p="console">Console</button><button data-p="errors">Errors <i class="ecount hide" id="ecount"></i></button></div>
+        <div class="tabs" id="sideTabs" role="tablist"><button class="ed-side-close" id="sideCloseBtn" type="button" aria-label="Back to code">← Code</button><button data-p="lib" aria-selected="true">Library</button><button data-p="inputs">Inputs</button><button data-p="setup">Test setup</button><button data-p="console">Console</button><button data-p="errors">Errors <i class="ecount hide" id="ecount"></i></button></div>
         <div class="scroll" style="flex:1">
           <div class="pane on" id="p-lib"></div>
           <div class="pane" id="p-inputs"></div>

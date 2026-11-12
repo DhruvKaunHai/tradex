@@ -91,6 +91,7 @@ function applyTheme() { document.documentElement.dataset.theme = settings.theme;
 /* ---------- views ---------- */
 const VIEWS = ['chart', 'editor', 'report', 'trades', 'compare', 'data', 'settings'];
 function go(v) { if (!VIEWS.includes(v)) v = 'chart'; A.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v);
+  if (v !== 'chart' && innerWidth <= 900) setDockClosed(true);
   $$('.view').forEach(x => x.classList.toggle('on', x.id === 'v-' + v));
   $$('#rail button').forEach(b => { const on = b.dataset.v === v; if (on) { b.setAttribute('aria-current', 'page'); $('#rail .glow').style.transform = `translateY(${b.offsetTop - 8}px)`; } else b.removeAttribute('aria-current'); });
   renderView(); if (v === 'chart') { chart.resize(); } if (v === 'editor') syncEditor(); }
@@ -98,7 +99,7 @@ function renderView() { const v = A.view, ctx = CTX; paintPeriod(); const PS = A
 $$('#rail button').forEach(b => (b.onclick = () => go(b.dataset.v)));
 document.addEventListener('click', e => { const g = e.target.closest('[data-go]'); if (g) go(g.dataset.go); });
 window.addEventListener('hashchange', () => go(location.hash.slice(1)));
-let rsz; window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { paintTf(); go(A.view); }, 150); });
+let rsz, wasMob = innerWidth <= 900; window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { const mob = innerWidth <= 900; if (mob && !wasMob) setDockClosed(true); wasMob = mob; paintTf(); go(A.view); }, 150); });
 const CTX = {
   goToTime: t => { go('chart'); setTimeout(() => chart.goToTime(t), 60); },
   goToTrade: (S, tr) => { go('chart'); S = A.strats.find(x => x.id === S.id) || S; S.visible = true; paintDock(); pushLayers(); setTimeout(() => { const off = S.offset || 0, span = Math.max(40, (tr.xi - tr.ei) * 3); chart.showRange(Math.max(0, tr.ei + off - span / 3), Math.min(chart.n - 1, tr.xi + off + span / 3)); showTradeCard(S, tr); }, 60); },
@@ -146,11 +147,16 @@ $('#legend').addEventListener('click', e => {
     paintLegend();
   }
 });
+let lastLegendSig = '';
 function paintLegend() {
-  const d = A.data[key(A.symbol, A.tf)], el = $('#legend'); if (!d || !d.t.length) { el.innerHTML = ''; return; }
+  const d = A.data[key(A.symbol, A.tf)], el = $('#legend'); if (!d || !d.t.length) { el.innerHTML = ''; lastLegendSig = ''; return; }
   const i = crossI >= 0 && crossI < d.t.length ? crossI : d.t.length - 1, ch = i > 0 ? d.c[i] - d.c[i - 1] : 0, c = d.c[i] >= d.o[i] ? 'up' : 'down';
   const activeStrats = A.strats.filter(S => S.visible && S.layer);
   const stratCount = activeStrats.length;
+  const stratSig = legendCollapsed ? String(stratCount) : activeStrats.map(s => `${s.id}:${s.layer.plots.slice(0, 5).map(p => p.data[i]).join(',')}`).join('|');
+  const sig = `${A.symbol}|${A.tf}|${i}|${d.o[i]}|${d.h[i]}|${d.l[i]}|${d.c[i]}|${legendCollapsed ? 1 : 0}|${stratSig}`;
+  if (sig === lastLegendSig) return;
+  lastLegendSig = sig;
   const toggleBtn = stratCount > 0 ? `<button class="legend-toggle${legendCollapsed ? '' : ' open'}" id="legendToggle" type="button" title="${legendCollapsed ? 'Show strategy indicators' : 'Hide strategy indicators'}"><span>${stratCount} ${stratCount === 1 ? 'Strategy' : 'Strategies'}</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg></button>` : '';
   let h = `<div class="row legend-ohlc"><span class="name">${SYMS[A.symbol]}</span><span class="muted">${A.tf} min, ${dtstr(d.t[i])}</span><span><b>O</b><i class="${c}" style="font-style:normal">${f2(d.o[i])}</i></span><span><b>H</b><i class="${c}" style="font-style:normal">${f2(d.h[i])}</i></span><span><b>L</b><i class="${c}" style="font-style:normal">${f2(d.l[i])}</i></span><span><b>C</b><i class="${c}" style="font-style:normal">${f2(d.c[i])}</i></span><span class="${cls(ch)}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)}</span>${toggleBtn}</div>`;
   if (stratCount > 0 && !legendCollapsed) {
@@ -166,7 +172,25 @@ function paintLegend() {
 }
 $$('#ranges button').forEach(b => (b.onclick = () => { const days = +b.dataset.r; if (!days) chart.fitAll(); else chart.showLast(Math.round(days * 375 / A.tf)); }));
 $('#jump').onchange = e => { if (e.target.value) chart.goToTime(Date.parse(e.target.value + 'T09:15:00+05:30') / 1000); };
-$('#dockToggle').onclick = () => { $('#dock').classList.toggle('closed'); setTimeout(() => { chart.resize(); paintDockTabs(); }, 300); };
+function setDockClosed(closed) {
+  const dock = $('#dock'), bd = $('#dockBackdrop'), tgl = $('#dockToggle');
+  if (!dock) return;
+  dock.classList.toggle('closed', closed);
+  if (bd) bd.classList.toggle('hide', closed);
+  if (tgl) tgl.setAttribute('aria-expanded', String(!closed));
+  setTimeout(() => { chart.resize(); paintDockTabs(); }, 280);
+}
+$('#dockToggle').onclick = () => setDockClosed(!$('#dock').classList.contains('closed'));
+const dockCloseBtn = $('#dockClose'); if (dockCloseBtn) dockCloseBtn.onclick = () => setDockClosed(true);
+const dockBd = $('#dockBackdrop'); if (dockBd) dockBd.onclick = () => setDockClosed(true);
+const touchCrossBtn = $('#touchCrossBtn');
+if (touchCrossBtn) {
+  touchCrossBtn.onclick = () => {
+    const next = !chart.touchCross;
+    chart.setTouchCross(next);
+    touchCrossBtn.setAttribute('aria-pressed', String(next));
+  };
+}
 function showTradeCard(S, tr, atCursor) {
   if (!S || !tr) return; const el = $('#tradeCard');
   const isOpen = !!(tr.open || tr.reason === 'Still open' || (tr.ref && (tr.ref.open || tr.ref.reason === 'Still open')));
@@ -904,6 +928,7 @@ $('#scriptName').onchange = () => { cur().name = $('#scriptName').value.trim() |
 $('#saveBtn').onclick = saveCurrent; $('#runBtn').onclick = () => runCurrent();
 const cb = $('#cloudBtn'); if (cb) cb.onclick = () => deployScriptToCloud(curId, $('#scriptName').value.trim() || 'Strategy', ta.value, {});
 $('#sideBtn').onclick = () => $('#v-editor').classList.toggle('side');
+const sideCloseBtn = $('#sideCloseBtn'); if (sideCloseBtn) sideCloseBtn.onclick = () => $('#v-editor').classList.remove('side');
 $('#openReport').onclick = () => { const S = A.strats.find(x => x.scriptId === curId); if (S) A.rep.sid = S.id; go('report'); };
 $('#showOnChart').onclick = () => go('chart');
 async function runCurrent() {
@@ -926,7 +951,7 @@ function afterRun(S, silent) {
   setMsg(`Tested ${S.symbolName} ${S.tf} min from ${dstr(S.data.t[0])} to ${dstr(S.data.t[S.data.t.length - 1])}${r.warnings.length ? '. ' + r.warnings.length + ' note in the console' : ''}`, 'ok');
 }
 function sidePane(p) { $$('#sideTabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.p === p)); $$('.ed-side .pane').forEach(x => x.classList.toggle('on', x.id === 'p-' + p)); }
-$$('#sideTabs button').forEach(b => (b.onclick = () => sidePane(b.dataset.p)));
+$$('#sideTabs button[data-p]').forEach(b => (b.onclick = () => sidePane(b.dataset.p)));
 function paintLib() {
   const el = $('#p-lib');
   el.innerHTML = `<div style="display:flex;gap:6px"><button class="btn small primary" id="newScript">New script</button><button class="btn small" id="dupScript">Duplicate</button><button class="btn small" id="delScript">Delete</button></div>
@@ -1368,7 +1393,7 @@ function renderSettings() {
 
 /* ---------- start ---------- */
 for (const o of store.get('onchart', [])) if (scripts.find(s => s.id === o.scriptId)) A.strats.push({ id: uid(), scriptId: o.scriptId, color: o.color, visible: o.visible !== false, inputs: o.inputs || {}, name: scripts.find(s => s.id === o.scriptId).name });
-if (innerWidth < 900) $('#dock').classList.add('closed');
+if (innerWidth <= 900) setDockClosed(true);
 paintSyms(); paintDock(); pushLayers(); go(location.hash.slice(1) || 'chart'); requestAnimationFrame(() => { paintTf(); paintDockTabs(); }); if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { paintTf(); paintDockTabs(); });
 fetchTgConfig();
 fetchCloudStrats();
