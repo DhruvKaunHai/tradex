@@ -29,6 +29,7 @@ async function loadData(sym, tf, force) {
 }
 function applyTick(sym, bar, livePrice, oldPrice) { // bar is a 5 minute candle [t,o,h,l,c]
   let newBar = false;
+  let barChanged = false;
   for (const tf of [5, 15, 30]) {
     const d = A.data[key(sym, tf)]; if (!d) continue; const n = d.t.length; let b = bar;
     if (tf !== 5) { const day = Math.floor((bar[0] + IST) / 86400), m = Math.floor(((bar[0] + IST) % 86400) / 60), t = day * 86400 - IST + (555 + Math.floor((m - 555) / tf) * tf) * 60;
@@ -37,8 +38,20 @@ function applyTick(sym, bar, livePrice, oldPrice) { // bar is a 5 minute candle 
     const isNew = !n || b[0] > d.t[n - 1];
     if (sym === A.symbol && tf === A.tf) { chart.updateLast(b, livePrice, oldPrice); if (isNew) newBar = true; }
     else if (isNew) { d.t.push(b[0]); d.o.push(b[1]); d.h.push(b[2]); d.l.push(b[3]); d.c.push(b[4]); } else { d.o[n - 1] = b[1]; d.h[n - 1] = b[2]; d.l[n - 1] = b[3]; d.c[n - 1] = b[4]; }
+    barChanged = true;
   }
-  if (newBar) { clearTimeout(applyTick.t); applyTick.t = setTimeout(() => runAll(true), 400); }
+  if (newBar) {
+    clearTimeout(applyTick.t);
+    applyTick.t = setTimeout(() => runAll(true), 300);
+  } else if (barChanged && sym === A.symbol) {
+    // Intrabar tick throttle: update running strategies every 2.5s so stop/target exits reflect on chart immediately
+    if (!applyTick.tickThrottle) {
+      applyTick.tickThrottle = setTimeout(() => {
+        applyTick.tickThrottle = null;
+        runAll(true);
+      }, 2500);
+    }
+  }
 }
 function connect() {
   let es; const open = () => {
@@ -930,93 +943,9 @@ function fmtIST(epochSec) {
 }
 
 function watchTradeAlerts(S, trades, data, sym, tf) {
-  if (!tgConfig.enabled || (!tgConfig.ownerActive && !(tgConfig.extraChatIds && tgConfig.extraChatIds.length))) return;
-  if (!trades || !trades.length || !data || !data.t.length) return;
-
-  if (!S._knownEntries) S._knownEntries = new Set();
-  if (!S._knownExits) S._knownExits = new Set();
-
-  const symName = SYMS[sym] || sym;
-  const stratName = S.name || 'Strategy';
-  const stratKey = S.id || stratName;
-  const lastBarIdx = data.t.length - 1;
-  const nowSec = Math.floor(Date.now() / 1000);
-
-  if (!S._alertInit) {
-    S._alertInit = true;
-    for (const t of trades) {
-      const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
-      S._knownEntries.add(ek);
-      if (!t.open && t.reason !== 'Still open') {
-        const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
-        S._knownExits.add(xk);
-      }
-    }
-    return;
-  }
-
-  for (const t of trades) {
-    const entryTime = t.et || data.t[t.ei] || 0;
-    const exitTime = t.xt || data.t[t.xi] || 0;
-    const isRecentEntry = t.ei >= lastBarIdx - 1 && Math.abs(nowSec - entryTime) < tf * 60 * 3;
-    const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 && Math.abs(nowSec - exitTime) < tf * 60 * 3;
-
-    // 1. Entry alert
-    const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
-    if (isRecentEntry && !S._knownEntries.has(ek)) {
-      S._knownEntries.add(ek);
-      const action = t.dir > 0 ? 'BUY' : 'SELL';
-      const icon = t.dir > 0 ? '🟢' : '🔴';
-      const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      const timeStr = fmtIST(entryTime || nowSec);
-
-      const msg = [
-        `${icon} <b>NEW TRADE EXECUTED</b>`,
-        '━━━━━━━━━━━━━━━━━━━━━',
-        `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
-        `🎯 <b>Action</b>: ${action} @ ${epStr} Pts.`,
-        `🧠 <b>Strategy</b>: ${stratName}`,
-        `⏰ <b>Time</b>: ${timeStr} IST`
-      ].join('\n');
-
-      fetch(`${API}/api/telegram/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'entry', text: msg, key: ek })
-      }).catch(() => {});
-    }
-
-    // 2. Exit alert
-    const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
-    if (isRecentExit && !S._knownExits.has(xk)) {
-      S._knownExits.add(xk);
-      const pts = t.pts != null ? t.pts : (t.xp - t.ep) * t.dir;
-      const isWin = pts >= 0;
-      const ptsSign = isWin ? '+' : '−';
-      const ptsAbs = Math.abs(pts).toFixed(2);
-      const xpStr = t.xp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      const timeStr = fmtIST(exitTime || nowSec);
-      const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
-      const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
-
-      const msg = [
-        '🏁 <b>TRADE COMPLETED</b>',
-        '━━━━━━━━━━━━━━━━━━━━━',
-        `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
-        `🎯 <b>Action</b>: EXIT ${t.dir > 0 ? 'BUY' : 'SELL'}${reason}`,
-        `💰 <b>Exit Price</b>: ${xpStr} Pts.`,
-        `📊 <b>Result</b>: ${resPill}`,
-        `🧠 <b>Strategy</b>: ${stratName}`,
-        `⏰ <b>Time</b>: ${timeStr} IST`
-      ].join('\n');
-
-      fetch(`${API}/api/telegram/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'exit', text: msg, key: xk })
-      }).catch(() => {});
-    }
-  }
+  // Client browser alert dispatcher disabled to prevent duplicate alerts.
+  // The cloud server index.js (runCloudStrats) runs 24/7 on Render and delivers single, reliable push alerts.
+  return;
 }
 
 /* ---------- settings tab ---------- */

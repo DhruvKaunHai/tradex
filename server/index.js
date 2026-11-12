@@ -110,6 +110,23 @@ function fmtIST(epochSec) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
+function fmtAlertTime(sec, refSec) {
+  if (!sec) return '';
+  const d = new Date((sec + IST) * 1000);
+  const dRef = new Date(((refSec || sec) + IST) * 1000);
+  const isSameDay = d.getUTCFullYear() === dRef.getUTCFullYear() &&
+                    d.getUTCMonth() === dRef.getUTCMonth() &&
+                    d.getUTCDate() === dRef.getUTCDate();
+  let h = d.getUTCHours(), m = d.getUTCMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
+  if (isSameDay) return timeStr;
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()];
+  return `${day} ${mon}, ${timeStr}`;
+}
+
 let lastSentHash = '';
 let lastSentTime = 0;
 
@@ -194,6 +211,40 @@ async function detectTelegramChatId(customToken) {
   });
 }
 
+function getOpenCloudTrades() {
+  const openTrades = [];
+  for (const cs of cloudStrats) {
+    if (cs.enabled === false || !cs.code) continue;
+    const sym = (cs.symbol || 'NIFTY').toUpperCase();
+    const S = store[sym];
+    if (!S || S.t.length < 50) continue;
+    const tf = cs.tf || 15;
+    const a = aggregate(sym, tf);
+    if (!a || a.t.length < 30) continue;
+    const count = Math.min(a.t.length, 1200);
+    const i0 = a.t.length - count;
+    const candleData = { t: a.t.slice(i0), o: a.o.slice(i0), h: a.h.slice(i0), l: a.l.slice(i0), c: a.c.slice(i0) };
+    try {
+      const r = Pine.run(cs.code, candleData, { tf, symbol: sym, inputs: cs.inputs || {} });
+      if (r && r.trades) {
+        for (const t of r.trades) {
+          if (t.open || t.reason === 'Still open') {
+            openTrades.push({
+              stratId: cs.id,
+              stratName: cs.name || cs.id,
+              symbol: sym,
+              symName: SYMBOLS[sym] ? SYMBOLS[sym].name : sym,
+              tf,
+              trade: t
+            });
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  return openTrades;
+}
+
 let lastOpenAlert = '', lastCloseAlert = '';
 function checkMarketAlerts() {
   if (!telegramConfig.enabled || !telegramConfig.notifyMarket || !getRecipientChatIds().length) return;
@@ -207,11 +258,22 @@ function checkMarketAlerts() {
   if (m >= OPEN_MIN && m < OPEN_MIN + 3 && lastOpenAlert !== dateKey) {
     lastOpenAlert = dateKey;
     const n = store.NIFTY, b = store.BANKNIFTY;
+    const openTrades = getOpenCloudTrades();
+    let posLine = '⚡ <b>Open Positions</b>: 0 active (All flat)';
+    if (openTrades.length) {
+      posLine = `⚡ <b>Open Positions (${openTrades.length})</b>:\n` + openTrades.map(ot => {
+        const dir = ot.trade.dir > 0 ? 'BUY' : 'SELL';
+        const ep = ot.trade.ep.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+        return `   • <b>${ot.symName} (${ot.tf}m)</b>: ${dir} @ ${ep} [${ot.stratName}]`;
+      }).join('\n');
+    }
+
     const msg = [
       '🔔 <b>NSE MARKET IS OPEN (09:15 AM IST)</b>',
       '━━━━━━━━━━━━━━━━━━━━━',
       `📈 <b>NIFTY 50</b>: ${n && n.price ? n.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts.`,
       `🏦 <b>BANK NIFTY</b>: ${b && b.price ? b.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts.`,
+      posLine,
       '',
       '🎯 TradeX is tracking live tick-by-tick. Have a disciplined trading session!'
     ].join('\n');
@@ -232,6 +294,18 @@ function checkMarketAlerts() {
     if (n) { for (let i = Math.max(0, n.t.length - 80); i < n.t.length; i++) { if (dayOf(n.t[i]) === today) { if (n.l[i] < nLo) nLo = n.l[i]; if (n.h[i] > nHi) nHi = n.h[i]; } } }
     if (b) { for (let i = Math.max(0, b.t.length - 80); i < b.t.length; i++) { if (dayOf(b.t[i]) === today) { if (b.l[i] < bLo) bLo = b.l[i]; if (b.h[i] > bHi) bHi = b.h[i]; } } }
 
+    const openTrades = getOpenCloudTrades();
+    let posSection = '⚡ <b>Open Overnight Positions</b>: 0 active\nAll cloud strategies closed flat before market close.';
+    if (openTrades.length) {
+      posSection = `⚡ <b>Open Overnight Positions (${openTrades.length})</b>:\n` + openTrades.map(ot => {
+        const dir = ot.trade.dir > 0 ? 'BUY' : 'SELL';
+        const ep = ot.trade.ep.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+        const pts = ot.trade.pts != null ? ot.trade.pts : 0;
+        const ptsStr = `${pts >= 0 ? '+' : '−'}${Math.abs(pts).toFixed(2)} pts`;
+        return `   • <b>${ot.symName} (${ot.tf}m)</b>: ${dir} @ ${ep} (${ptsStr}) [${ot.stratName}]`;
+      }).join('\n');
+    }
+
     const msg = [
       '🏁 <b>NSE MARKET CLOSED (03:30 PM IST)</b>',
       '━━━━━━━━━━━━━━━━━━━━━',
@@ -240,6 +314,8 @@ function checkMarketAlerts() {
       '',
       `🏦 <b>BANK NIFTY</b>: ${b && b.price ? b.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts. (${bDiff >= 0 ? '+' : ''}${bDiff.toFixed(2)} Pts. / ${bPct >= 0 ? '+' : ''}${bPct.toFixed(2)}%)`,
       bLo < Infinity ? `   • Day Range: ${bLo.toLocaleString('en-IN', { minimumFractionDigits: 2 })} – ${bHi.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : '',
+      '━━━━━━━━━━━━━━━━━━━━━',
+      posSection,
       '━━━━━━━━━━━━━━━━━━━━━',
       'Trading session ended. Have a great evening!'
     ].filter(Boolean).join('\n');
@@ -389,7 +465,11 @@ function runCloudStrats() {
       const entryTime = t.et || candleData.t[t.ei] || 0;
       const exitTime = t.xt || candleData.t[t.xi] || 0;
       const isRecentEntry = t.ei >= lastBarIdx - 1 && Math.abs(nowSec - entryTime) < tf * 60 * 3;
-      const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 && Math.abs(nowSec - exitTime) < tf * 60 * 3;
+      const isOvernightExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 &&
+        m >= OPEN_MIN && m < OPEN_MIN + 25 &&
+        (Math.abs(nowSec - (candleData.t[t.xi] || exitTime)) < 3600);
+      const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 &&
+        (Math.abs(nowSec - exitTime) < tf * 60 * 3 || isOvernightExit);
 
       // 1. Entry alert
       const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
@@ -425,20 +505,29 @@ function runCloudStrats() {
           const isWin = pts >= 0;
           const ptsSign = isWin ? '+' : '−';
           const ptsAbs = Math.abs(pts).toFixed(2);
+          const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           const xpStr = t.xp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-          const timeStr = fmtIST(exitTime || nowSec);
+          const exitTimeStr = fmtAlertTime(exitTime || nowSec);
+          const entryTimeStr = fmtAlertTime(entryTime, exitTime || nowSec);
           const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
           const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
+
+          const candlesHeld = t.bars != null ? t.bars : (t.xi != null && t.ei != null ? Math.max(1, t.xi - t.ei) : null);
+          const isOvernight = entryTime && exitTime && dayOf(entryTime) !== dayOf(exitTime);
+          const durationStr = candlesHeld != null
+            ? `${candlesHeld} candle${candlesHeld === 1 ? '' : 's'}${isOvernight ? ' (overnight)' : ` (${candlesHeld * tf}m)`}`
+            : (isOvernight ? 'Overnight' : '—');
 
           const msg = [
             '🏁 <b>TRADE COMPLETED</b>',
             '━━━━━━━━━━━━━━━━━━━━━',
             `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
             `🎯 <b>Action</b>: EXIT ${t.dir > 0 ? 'BUY' : 'SELL'}${reason}`,
-            `💰 <b>Exit Price</b>: ${xpStr} Pts.`,
+            `💰 <b>Entry</b>: ${epStr} Pts. (${entryTimeStr} IST)`,
+            `💰 <b>Exit</b>: ${xpStr} Pts. (${exitTimeStr} IST)`,
+            `⏳ <b>Duration</b>: ${durationStr}`,
             `📊 <b>Result</b>: ${resPill}`,
-            `🧠 <b>Strategy</b>: ${stratName}`,
-            `⏰ <b>Time</b>: ${timeStr} IST`
+            `🧠 <b>Strategy</b>: ${stratName}`
           ].join('\n');
 
           sendTelegram(msg).catch(() => {});
@@ -852,6 +941,124 @@ const server = http.createServer(async (req, res) => {
   } catch (e) { log('request failed:', e.message); try { send(req, res, 500, { error: 'Server error' }); } catch (_) { /* reply already started */ } }
 });
 
+/* ---------- telegram bot interactive polling (/info, /status) ---------- */
+let tgPollOffset = 0;
+let tgPollingActive = false;
+
+async function pollTelegramUpdates() {
+  const token = telegramConfig.token;
+  if (!token || !telegramConfig.enabled || tgPollingActive) return;
+  tgPollingActive = true;
+  try {
+    const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/getUpdates?offset=${tgPollOffset}&timeout=5`;
+    const res = await new Promise(ok => {
+      https.get(url, r => {
+        let d = ''; r.on('data', c => d += c);
+        r.on('end', () => {
+          try { ok(JSON.parse(d)); } catch (_) { ok(null); }
+        });
+      }).on('error', () => ok(null));
+    });
+
+    if (res && res.ok && Array.isArray(res.result)) {
+      for (const u of res.result) {
+        if (u.update_id >= tgPollOffset) tgPollOffset = u.update_id + 1;
+        const msg = u.message;
+        if (!msg || !msg.text || !msg.chat || !msg.chat.id) continue;
+        const chatId = String(msg.chat.id);
+        const recipients = getRecipientChatIds();
+        if (!recipients.includes(chatId)) continue; // security: only answer authorized recipients
+
+        const text = String(msg.text).trim().toLowerCase();
+        if (text === '/info' || text === '/trades' || text === 'info') {
+          const openTrades = getOpenCloudTrades();
+          const d = new Date(Date.now() + IST * 1000);
+          let h = d.getUTCHours(), mi = d.getUTCMinutes();
+          const ap = h >= 12 ? 'PM' : 'AM';
+          h = h % 12; if (!h) h = 12;
+          const timeStr = `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')} ${ap}`;
+
+          if (!openTrades.length) {
+            const resp = [
+              '📊 <b>TRADEX POSITION STATUS</b>',
+              '━━━━━━━━━━━━━━━━━━━━━',
+              '⚡ <b>Open Positions</b>: 0 active',
+              `🤖 <b>Cloud Strategies</b>: ${cloudStrats.length} running 24/7`,
+              `📈 <b>Market</b>: ${marketOpenNow() ? 'OPEN' : 'CLOSED'} (${timeStr} IST)`,
+              '',
+              'All strategies are flat (no active positions). Alerts will fire automatically on the next entry/exit.'
+            ].join('\n');
+            sendTelegramSingle(token, chatId, resp).catch(() => {});
+          } else {
+            const lines = openTrades.map((ot, idx) => {
+              const tr = ot.trade;
+              const dir = tr.dir > 0 ? 'BUY' : 'SELL';
+              const icon = tr.dir > 0 ? '🟢' : '🔴';
+              const ep = tr.ep.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+              const pts = tr.pts != null ? tr.pts : 0;
+              const ptsStr = `${pts >= 0 ? '+' : '−'}${Math.abs(pts).toFixed(2)} Pts.`;
+              const entryTime = fmtAlertTime(tr.et);
+              const candles = tr.bars != null ? `${tr.bars} candle${tr.bars === 1 ? '' : 's'}` : '';
+              return [
+                `<b>${idx + 1}. ${icon} ${ot.symName} (${ot.tf}m) — ${dir}</b>`,
+                `   • Strategy: <i>${ot.stratName}</i>`,
+                `   • Entry: ${ep} Pts. (${entryTime} IST)`,
+                `   • Current PnL: <b>${ptsStr}</b>${candles ? ` (${candles})` : ''}`,
+                tr.sl != null ? `   • Trailing SL: ${tr.sl.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : '',
+                tr.tp != null ? `   • Target: ${tr.tp.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : ''
+              ].filter(Boolean).join('\n');
+            });
+
+            const resp = [
+              `📊 <b>TRADEX OPEN POSITIONS (${openTrades.length})</b>`,
+              '━━━━━━━━━━━━━━━━━━━━━',
+              lines.join('\n\n'),
+              '━━━━━━━━━━━━━━━━━━━━━',
+              `⏰ As of: ${timeStr} IST`
+            ].join('\n');
+            sendTelegramSingle(token, chatId, resp).catch(() => {});
+          }
+        } else if (text === '/status' || text === 'status') {
+          const d = new Date(Date.now() + IST * 1000);
+          let h = d.getUTCHours(), mi = d.getUTCMinutes();
+          const ap = h >= 12 ? 'PM' : 'AM';
+          h = h % 12; if (!h) h = 12;
+          const timeStr = `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')} ${ap}`;
+          const n = store.NIFTY, b = store.BANKNIFTY;
+          const resp = [
+            '⚡ <b>TRADEX SYSTEM STATUS</b>',
+            '━━━━━━━━━━━━━━━━━━━━━',
+            `📈 <b>Market Status</b>: ${marketOpenNow() ? 'OPEN ✅' : 'CLOSED ⏸️'}`,
+            `⏰ <b>Server Time</b>: ${timeStr} IST`,
+            `🎯 <b>NIFTY 50</b>: ${n && n.price ? n.price.toFixed(2) : '—'} Pts.`,
+            `🏦 <b>BANK NIFTY</b>: ${b && b.price ? b.price.toFixed(2) : '—'} Pts.`,
+            `🤖 <b>Cloud Strategies</b>: ${cloudStrats.length} active`,
+            `🔔 <b>Alert Notifications</b>: ${telegramConfig.enabled ? 'Enabled' : 'Disabled'}`,
+            '━━━━━━━━━━━━━━━━━━━━━',
+            'Send /info to view open trades.'
+          ].join('\n');
+          sendTelegramSingle(token, chatId, resp).catch(() => {});
+        } else if (text === '/help' || text === '/start') {
+          const resp = [
+            '🤖 <b>TradeX Terminal Bot</b>',
+            '━━━━━━━━━━━━━━━━━━━━━',
+            'Available commands:',
+            '• /info - View active trade positions & running strategy details',
+            '• /status - View market status and live index prices',
+            '• /help - Show this commands guide',
+            '━━━━━━━━━━━━━━━━━━━━━',
+            'Real-time alerts for entries, exits, and market open/close are delivered automatically.'
+          ].join('\n');
+          sendTelegramSingle(token, chatId, resp).catch(() => {});
+        }
+      }
+    }
+  } catch (_) {}
+  finally {
+    tgPollingActive = false;
+  }
+}
+
 async function boot() {
   for (const sym in SYMBOLS) load(sym);
   server.listen(PORT, () => log(`TradeX is running. Open http://localhost:${PORT}`));
@@ -865,6 +1072,8 @@ async function boot() {
   setInterval(() => { for (const sym in SYMBOLS) save(sym); }, 60000);
   setInterval(() => broadcast({ type: 'ping', marketOpen: marketOpenNow() }), 15000);
   setInterval(() => { for (const sym in SYMBOLS) yahooHistory(sym); }, 6 * 3600 * 1000);
+  setInterval(pollTelegramUpdates, 4000);
+  pollTelegramUpdates();
 }
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { for (const sym in SYMBOLS) save(sym); process.exit(0); });
 boot();
