@@ -339,7 +339,7 @@ function buildFriendWelcomeMessage() {
     '<b>📋 Bot Commands:</b>',
     '• /strategies — Turn live strategy entry/exit alerts <b>ON / OFF</b> (for your chat only)',
     '   (Or use /strategies_on or /strategies_off directly)',
-    '• /status — Request live NIFTY 50 &amp; BANK NIFTY market data &amp; session status',
+    '• /status or /market — Request live NIFTY 50 &amp; BANK NIFTY market data &amp; session status',
     '• /info — View currently open trade positions &amp; active strategies',
     '• /help — Show all commands and your current alert setting',
     '━━━━━━━━━━━━━━━━━━━━━',
@@ -529,17 +529,91 @@ function getOpenCloudTrades() {
 }
 
 let lastOpenAlert = '', lastCloseAlert = '';
+function getDailyMarketSummary(sym, today) {
+  const S = store[sym];
+  if (!S) return null;
+  let barOpen = null, barHigh = -Infinity, barLow = Infinity, barClose = null;
+  for (let i = Math.max(0, S.t.length - 120); i < S.t.length; i++) {
+    if (dayOf(S.t[i]) === today) {
+      if (barOpen === null) barOpen = S.o[i];
+      if (S.h[i] > barHigh) barHigh = S.h[i];
+      if (S.l[i] < barLow) barLow = S.l[i];
+      barClose = S.c[i];
+    }
+  }
+  const hasTodayMeta = S.dayKey === today;
+  const open = hasTodayMeta && Number.isFinite(S.dayOpen) ? S.dayOpen : barOpen;
+  const close = Number.isFinite(S.price) && S.price > 0 ? S.price : barClose;
+  let high = hasTodayMeta && Number.isFinite(S.dayHigh) ? S.dayHigh : (barHigh > -Infinity ? barHigh : null);
+  let low = hasTodayMeta && Number.isFinite(S.dayLow) ? S.dayLow : (barLow < Infinity ? barLow : null);
+  if (high != null && barHigh > -Infinity) high = Math.max(high, barHigh);
+  if (low != null && barLow < Infinity) low = Math.min(low, barLow);
+  if (high != null && Number.isFinite(close)) high = Math.max(high, close);
+  if (low != null && Number.isFinite(close)) low = Math.min(low, close);
+  const prevClose = Number.isFinite(S.prevClose) ? S.prevClose : null;
+  const diff = (close != null && prevClose) ? +(close - prevClose).toFixed(2) : 0;
+  const pct = prevClose ? +((diff / prevClose) * 100).toFixed(2) : 0;
+  return { open, close, high, low, prevClose, diff, pct };
+}
+
+async function sendMarketCloseAlert(dateKey, today) {
+  try {
+    await Promise.all(Object.keys(SYMBOLS).map(sym => pollYahoo(sym).catch(() => {})));
+    await pollTradingView().catch(() => {});
+  } catch (_) {}
+
+  const formatIdxBlock = (icon, title, sym) => {
+    const s = getDailyMarketSummary(sym, today);
+    const f = v => (v != null && Number.isFinite(v)) ? v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+    const diffStr = s && s.prevClose ? ` (${s.diff >= 0 ? '+' : ''}${s.diff.toFixed(2)} / ${s.pct >= 0 ? '+' : ''}${s.pct.toFixed(2)}%)` : '';
+    const rangeStr = (s && s.low != null && s.high != null) ? `${f(s.low)} – ${f(s.high)} Pts.` : '—';
+    return [
+      `${icon} <b>${title}</b>`,
+      `   • Open: ${f(s && s.open)} Pts.  |  Close: <b>${f(s && s.close)} Pts.</b>${diffStr}`,
+      `   • Day Range: ${rangeStr}`
+    ].join('\n');
+  };
+
+  const openTrades = getOpenCloudTrades();
+  let posSection = '⚡ <b>Open Overnight Positions</b>: 0 active\nAll cloud strategies closed flat before market close.';
+  if (openTrades.length) {
+    posSection = `⚡ <b>Open Overnight Positions (${openTrades.length})</b>:\n` + openTrades.map(ot => {
+      const dir = ot.trade.dir > 0 ? 'BUY' : 'SELL';
+      const ep = ot.trade.ep.toLocaleString('en-IN', { minimumFractionDigits: 2 });
+      const pts = ot.trade.pts != null ? ot.trade.pts : 0;
+      const ptsStr = `${pts >= 0 ? '+' : '−'}${Math.abs(pts).toFixed(2)} pts`;
+      return `   • <b>${ot.symName} (${ot.tf}m)</b>: ${dir} @ ${ep} (${ptsStr}) [${ot.stratName}]`;
+    }).join('\n');
+  }
+
+  const msg = [
+    '🏁 <b>NSE MARKET CLOSED (03:31 PM IST)</b>',
+    '━━━━━━━━━━━━━━━━━━━━━',
+    formatIdxBlock('📈', 'NIFTY 50', 'NIFTY'),
+    '',
+    formatIdxBlock('🏦', 'BANK NIFTY', 'BANKNIFTY'),
+    '━━━━━━━━━━━━━━━━━━━━━',
+    posSection,
+    '━━━━━━━━━━━━━━━━━━━━━',
+    'Trading session ended. Have a great evening!'
+  ].join('\n');
+  sendTelegram(msg, null, null, false, { category: 'market' }).catch(() => {});
+}
+
 function checkMarketAlerts() {
   if (!telegramConfig.enabled || !telegramConfig.notifyMarket || !getRecipientChatIds().length) return;
   const now = Date.now() / 1000;
   const wd = new Date((now + IST) * 1000).getUTCDay();
   if (wd < 1 || wd > 5) return;
   const m = minOfDay(now);
+  const secIST = Math.floor((now + IST) % 86400);
   const dateKey = new Date((now + IST) * 1000).toISOString().slice(0, 10);
 
   // 1. Market Open Alert at 09:15 AM IST
-  if (m >= OPEN_MIN && m < OPEN_MIN + 3 && lastOpenAlert !== dateKey) {
+  const openKey = `market_open_${dateKey}`;
+  if (m >= OPEN_MIN && m < OPEN_MIN + 4 && lastOpenAlert !== dateKey && !isAlertSent(openKey)) {
     lastOpenAlert = dateKey;
+    recordSentAlert(openKey);
     const n = store.NIFTY, b = store.BANKNIFTY;
     const openTrades = getOpenCloudTrades();
     let posLine = '⚡ <b>Open Positions</b>: 0 active (All flat)';
@@ -563,46 +637,12 @@ function checkMarketAlerts() {
     sendTelegram(msg, null, null, false, { category: 'market' }).catch(() => {});
   }
 
-  // 2. Market Close Alert at 03:30 PM IST with index points summary
-  if (m >= CLOSE_MIN && m < CLOSE_MIN + 4 && lastCloseAlert !== dateKey) {
+  // 2. Market Close Alert at 03:31 PM IST (after official NSE closing settlement)
+  const closeKey = `market_close_${dateKey}`;
+  if (secIST >= CLOSE_MIN * 60 + 65 && secIST < (CLOSE_MIN + 10) * 60 && lastCloseAlert !== dateKey && !isAlertSent(closeKey)) {
     lastCloseAlert = dateKey;
-    const n = store.NIFTY, b = store.BANKNIFTY;
-    const nDiff = n && n.price && n.prevClose ? +(n.price - n.prevClose).toFixed(2) : 0;
-    const nPct = n && n.prevClose ? +((nDiff / n.prevClose) * 100).toFixed(2) : 0;
-    const bDiff = b && b.price && b.prevClose ? +(b.price - b.prevClose).toFixed(2) : 0;
-    const bPct = b && b.prevClose ? +((bDiff / b.prevClose) * 100).toFixed(2) : 0;
-
-    const today = dayOf(now);
-    let nLo = Infinity, nHi = -Infinity, bLo = Infinity, bHi = -Infinity;
-    if (n) { for (let i = Math.max(0, n.t.length - 80); i < n.t.length; i++) { if (dayOf(n.t[i]) === today) { if (n.l[i] < nLo) nLo = n.l[i]; if (n.h[i] > nHi) nHi = n.h[i]; } } }
-    if (b) { for (let i = Math.max(0, b.t.length - 80); i < b.t.length; i++) { if (dayOf(b.t[i]) === today) { if (b.l[i] < bLo) bLo = b.l[i]; if (b.h[i] > bHi) bHi = b.h[i]; } } }
-
-    const openTrades = getOpenCloudTrades();
-    let posSection = '⚡ <b>Open Overnight Positions</b>: 0 active\nAll cloud strategies closed flat before market close.';
-    if (openTrades.length) {
-      posSection = `⚡ <b>Open Overnight Positions (${openTrades.length})</b>:\n` + openTrades.map(ot => {
-        const dir = ot.trade.dir > 0 ? 'BUY' : 'SELL';
-        const ep = ot.trade.ep.toLocaleString('en-IN', { minimumFractionDigits: 2 });
-        const pts = ot.trade.pts != null ? ot.trade.pts : 0;
-        const ptsStr = `${pts >= 0 ? '+' : '−'}${Math.abs(pts).toFixed(2)} pts`;
-        return `   • <b>${ot.symName} (${ot.tf}m)</b>: ${dir} @ ${ep} (${ptsStr}) [${ot.stratName}]`;
-      }).join('\n');
-    }
-
-    const msg = [
-      '🏁 <b>NSE MARKET CLOSED (03:30 PM IST)</b>',
-      '━━━━━━━━━━━━━━━━━━━━━',
-      `📈 <b>NIFTY 50</b>: ${n && n.price ? n.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts. (${nDiff >= 0 ? '+' : ''}${nDiff.toFixed(2)} Pts. / ${nPct >= 0 ? '+' : ''}${nPct.toFixed(2)}%)`,
-      nLo < Infinity ? `   • Day Range: ${nLo.toLocaleString('en-IN', { minimumFractionDigits: 2 })} – ${nHi.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : '',
-      '',
-      `🏦 <b>BANK NIFTY</b>: ${b && b.price ? b.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts. (${bDiff >= 0 ? '+' : ''}${bDiff.toFixed(2)} Pts. / ${bPct >= 0 ? '+' : ''}${bPct.toFixed(2)}%)`,
-      bLo < Infinity ? `   • Day Range: ${bLo.toLocaleString('en-IN', { minimumFractionDigits: 2 })} – ${bHi.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : '',
-      '━━━━━━━━━━━━━━━━━━━━━',
-      posSection,
-      '━━━━━━━━━━━━━━━━━━━━━',
-      'Trading session ended. Have a great evening!'
-    ].filter(Boolean).join('\n');
-    sendTelegram(msg, null, null, false, { category: 'market' }).catch(() => {});
+    recordSentAlert(closeKey);
+    sendMarketCloseAlert(dateKey, dayOf(now)).catch(err => log('Market close alert error:', err.message));
   }
 }
 
@@ -696,133 +736,138 @@ loadCloudStrats();
 function runCloudStrats() {
   if (!telegramConfig.enabled || !getRecipientChatIds().length || !cloudStrats.length) return;
   for (const cs of cloudStrats) {
-    if (cs.enabled === false || !cs.code) continue;
-    const sym = (cs.symbol || 'NIFTY').toUpperCase();
-    const S = store[sym];
-    if (!S || S.t.length < 50) continue;
-    const tf = cs.tf || 15;
-    const a = aggregate(sym, tf);
-    if (!a || a.t.length < 30) continue;
-
-    const count = Math.min(a.t.length, 1200);
-    const i0 = a.t.length - count;
-    const candleData = {
-      t: a.t.slice(i0),
-      o: a.o.slice(i0),
-      h: a.h.slice(i0),
-      l: a.l.slice(i0),
-      c: a.c.slice(i0)
-    };
-
-    let r;
     try {
-      r = Pine.run(cs.code, candleData, { tf, symbol: sym, inputs: cs.inputs || {} });
-    } catch (err) {
-      cs.lastError = err.message;
-      continue;
-    }
-    cs.lastError = null;
-    if (!r || !r.trades) continue;
+      if (cs.enabled === false || !cs.code) continue;
+      const sym = (cs.symbol || 'NIFTY').toUpperCase();
+      const S = store[sym];
+      if (!S || S.t.length < 50) continue;
+      const tf = cs.tf || 15;
+      const a = aggregate(sym, tf);
+      if (!a || a.t.length < 30) continue;
 
-    if (!cs._knownEntries) cs._knownEntries = new Set();
-    if (!cs._knownExits) cs._knownExits = new Set();
+      const count = Math.min(a.t.length, 1200);
+      const i0 = a.t.length - count;
+      const candleData = {
+        t: a.t.slice(i0),
+        o: a.o.slice(i0),
+        h: a.h.slice(i0),
+        l: a.l.slice(i0),
+        c: a.c.slice(i0)
+      };
 
-    const symName = SYMBOLS[sym] ? SYMBOLS[sym].name : sym;
-    const stratName = cs.name || 'Strategy';
-    const stratKey = cs.id || stratName;
-    const lastBarIdx = candleData.t.length - 1;
-    const nowSec = Math.floor(Date.now() / 1000);
+      let r;
+      try {
+        r = Pine.run(cs.code, candleData, { tf, symbol: sym, inputs: cs.inputs || {} });
+      } catch (err) {
+        cs.lastError = err.message;
+        continue;
+      }
+      cs.lastError = null;
+      if (!r || !r.trades) continue;
 
-    // Initial run: register all existing backtest trades as known (ZERO spam)
-    if (!cs._alertInit) {
-      cs._alertInit = true;
+      if (!cs._knownEntries) cs._knownEntries = new Set();
+      if (!cs._knownExits) cs._knownExits = new Set();
+
+      const symName = SYMBOLS[sym] ? SYMBOLS[sym].name : sym;
+      const stratName = cs.name || 'Strategy';
+      const stratKey = cs.id || stratName;
+      const lastBarIdx = candleData.t.length - 1;
+      const nowSec = Math.floor(Date.now() / 1000);
+      const m = minOfDay(nowSec);
+
+      // Initial run: register all existing backtest trades as known (ZERO spam)
+      if (!cs._alertInit) {
+        cs._alertInit = true;
+        for (const t of r.trades) {
+          const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
+          cs._knownEntries.add(ek);
+          sentAlerts.add(ek);
+          if (!t.open && t.reason !== 'Still open') {
+            const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
+            cs._knownExits.add(xk);
+            sentAlerts.add(xk);
+          }
+        }
+        saveSentAlerts();
+        continue;
+      }
+
+      // Live trades: alert only on recent real-time entries/exits within 3x candle timeframe
       for (const t of r.trades) {
+        const entryTime = t.et || candleData.t[t.ei] || 0;
+        const exitTime = t.xt || candleData.t[t.xi] || 0;
+        const isRecentEntry = t.ei >= lastBarIdx - 1 && Math.abs(nowSec - entryTime) < tf * 60 * 3;
+        const isOvernightExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 &&
+          m >= OPEN_MIN && m < OPEN_MIN + 25 &&
+          (Math.abs(nowSec - (candleData.t[t.xi] || exitTime)) < 3600);
+        const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 &&
+          (Math.abs(nowSec - exitTime) < tf * 60 * 3 || isOvernightExit);
+
+        // 1. Entry alert
         const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
-        cs._knownEntries.add(ek);
-        sentAlerts.add(ek);
-        if (!t.open && t.reason !== 'Still open') {
-          const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
+        if (isRecentEntry && !cs._knownEntries.has(ek) && !isAlertSent(ek)) {
+          cs._knownEntries.add(ek);
+          recordSentAlert(ek);
+          if (telegramConfig.notifyEntries) {
+            const action = t.dir > 0 ? 'BUY' : 'SELL';
+            const icon = t.dir > 0 ? '🟢' : '🔴';
+            const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const timeStr = fmtIST(entryTime || nowSec);
+
+            const msg = [
+              `${icon} <b>NEW TRADE EXECUTED</b>`,
+              '━━━━━━━━━━━━━━━━━━━━━',
+              `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
+              `🎯 <b>Action</b>: ${action} @ ${epStr} Pts.`,
+              `🧠 <b>Strategy</b>: ${stratName}`,
+              `⏰ <b>Time</b>: ${timeStr} IST`
+            ].join('\n');
+
+            sendTelegram(msg, null, null, false, { category: 'strategy' }).catch(() => {});
+          }
+        }
+
+        // 2. Exit alert
+        const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
+        if (isRecentExit && !cs._knownExits.has(xk) && !isAlertSent(xk)) {
           cs._knownExits.add(xk);
-          sentAlerts.add(xk);
+          recordSentAlert(xk);
+          if (telegramConfig.notifyExits) {
+            const pts = t.pts != null ? t.pts : (t.xp - t.ep) * t.dir;
+            const isWin = pts >= 0;
+            const ptsSign = isWin ? '+' : '−';
+            const ptsAbs = Math.abs(pts).toFixed(2);
+            const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const xpStr = t.xp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const exitTimeStr = fmtAlertTime(exitTime || nowSec);
+            const entryTimeStr = fmtAlertTime(entryTime, exitTime || nowSec);
+            const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
+            const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
+
+            const candlesHeld = t.bars != null ? t.bars : (t.xi != null && t.ei != null ? Math.max(1, t.xi - t.ei) : null);
+            const isOvernight = entryTime && exitTime && dayOf(entryTime) !== dayOf(exitTime);
+            const durationStr = candlesHeld != null
+              ? `${candlesHeld} candle${candlesHeld === 1 ? '' : 's'}${isOvernight ? ' (overnight)' : ` (${candlesHeld * tf}m)`}`
+              : (isOvernight ? 'Overnight' : '—');
+
+            const msg = [
+              '🏁 <b>TRADE COMPLETED</b>',
+              '━━━━━━━━━━━━━━━━━━━━━',
+              `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
+              `🎯 <b>Action</b>: EXIT ${t.dir > 0 ? 'BUY' : 'SELL'}${reason}`,
+              `💰 <b>Entry</b>: ${epStr} Pts. (${entryTimeStr} IST)`,
+              `💰 <b>Exit</b>: ${xpStr} Pts. (${exitTimeStr} IST)`,
+              `⏳ <b>Duration</b>: ${durationStr}`,
+              `📊 <b>Result</b>: ${resPill}`,
+              `🧠 <b>Strategy</b>: ${stratName}`
+            ].join('\n');
+
+            sendTelegram(msg, null, null, false, { category: 'strategy' }).catch(() => {});
+          }
         }
       }
-      saveSentAlerts();
-      continue;
-    }
-
-    // Live trades: alert only on recent real-time entries/exits within 3x candle timeframe
-    for (const t of r.trades) {
-      const entryTime = t.et || candleData.t[t.ei] || 0;
-      const exitTime = t.xt || candleData.t[t.xi] || 0;
-      const isRecentEntry = t.ei >= lastBarIdx - 1 && Math.abs(nowSec - entryTime) < tf * 60 * 3;
-      const isOvernightExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 &&
-        m >= OPEN_MIN && m < OPEN_MIN + 25 &&
-        (Math.abs(nowSec - (candleData.t[t.xi] || exitTime)) < 3600);
-      const isRecentExit = !t.open && t.reason !== 'Still open' && t.xi >= lastBarIdx - 1 &&
-        (Math.abs(nowSec - exitTime) < tf * 60 * 3 || isOvernightExit);
-
-      // 1. Entry alert
-      const ek = `entry_${sym}_${tf}_${stratKey}_${t.et}_${t.dir}`;
-      if (isRecentEntry && !cs._knownEntries.has(ek) && !isAlertSent(ek)) {
-        cs._knownEntries.add(ek);
-        recordSentAlert(ek);
-        if (telegramConfig.notifyEntries) {
-          const action = t.dir > 0 ? 'BUY' : 'SELL';
-          const icon = t.dir > 0 ? '🟢' : '🔴';
-          const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-          const timeStr = fmtIST(entryTime || nowSec);
-
-          const msg = [
-            `${icon} <b>NEW TRADE EXECUTED</b>`,
-            '━━━━━━━━━━━━━━━━━━━━━',
-            `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
-            `🎯 <b>Action</b>: ${action} @ ${epStr} Pts.`,
-            `🧠 <b>Strategy</b>: ${stratName}`,
-            `⏰ <b>Time</b>: ${timeStr} IST`
-          ].join('\n');
-
-          sendTelegram(msg, null, null, false, { category: 'strategy' }).catch(() => {});
-        }
-      }
-
-      // 2. Exit alert
-      const xk = `exit_${sym}_${tf}_${stratKey}_${t.et}_${t.xt}_${t.dir}`;
-      if (isRecentExit && !cs._knownExits.has(xk) && !isAlertSent(xk)) {
-        cs._knownExits.add(xk);
-        recordSentAlert(xk);
-        if (telegramConfig.notifyExits) {
-          const pts = t.pts != null ? t.pts : (t.xp - t.ep) * t.dir;
-          const isWin = pts >= 0;
-          const ptsSign = isWin ? '+' : '−';
-          const ptsAbs = Math.abs(pts).toFixed(2);
-          const epStr = t.ep.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-          const xpStr = t.xp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-          const exitTimeStr = fmtAlertTime(exitTime || nowSec);
-          const entryTimeStr = fmtAlertTime(entryTime, exitTime || nowSec);
-          const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
-          const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
-
-          const candlesHeld = t.bars != null ? t.bars : (t.xi != null && t.ei != null ? Math.max(1, t.xi - t.ei) : null);
-          const isOvernight = entryTime && exitTime && dayOf(entryTime) !== dayOf(exitTime);
-          const durationStr = candlesHeld != null
-            ? `${candlesHeld} candle${candlesHeld === 1 ? '' : 's'}${isOvernight ? ' (overnight)' : ` (${candlesHeld * tf}m)`}`
-            : (isOvernight ? 'Overnight' : '—');
-
-          const msg = [
-            '🏁 <b>TRADE COMPLETED</b>',
-            '━━━━━━━━━━━━━━━━━━━━━',
-            `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
-            `🎯 <b>Action</b>: EXIT ${t.dir > 0 ? 'BUY' : 'SELL'}${reason}`,
-            `💰 <b>Entry</b>: ${epStr} Pts. (${entryTimeStr} IST)`,
-            `💰 <b>Exit</b>: ${xpStr} Pts. (${exitTimeStr} IST)`,
-            `⏳ <b>Duration</b>: ${durationStr}`,
-            `📊 <b>Result</b>: ${resPill}`,
-            `🧠 <b>Strategy</b>: ${stratName}`
-          ].join('\n');
-
-          sendTelegram(msg, null, null, false, { category: 'strategy' }).catch(() => {});
-        }
-      }
+    } catch (stratErr) {
+      log('Cloud strat eval error:', cs && cs.name, stratErr.message);
     }
   }
 }
@@ -925,9 +970,28 @@ async function pollYahoo(sym) {
   const { bars, meta } = yahooBars(await getJson(`${YAHOO}/v8/finance/chart/${encodeURIComponent(SYMBOLS[sym].yahoo)}?interval=1m&range=1d`, 8000));
   const before = S.ver; merge(sym, bars, true);
   const price = meta.regularMarketPrice, pt = meta.regularMarketTime;
+  const nowDay = dayOf(Math.floor(Date.now() / 1000));
+  const ptIsToday = Number.isFinite(pt) && dayOf(pt) === nowDay;
+  const todayBars = bars.filter(b => dayOf(b[0]) === nowDay);
+  if (todayBars.length || ptIsToday) {
+    if (S.dayKey !== nowDay) {
+      S.dayKey = nowDay;
+      S.dayOpen = todayBars.length ? todayBars[0][1] : null;
+      S.dayHigh = null;
+      S.dayLow = null;
+    } else if (!Number.isFinite(S.dayOpen) && todayBars.length) {
+      S.dayOpen = todayBars[0][1];
+    }
+    if (ptIsToday && Number.isFinite(meta.regularMarketDayHigh)) S.dayHigh = Number.isFinite(S.dayHigh) ? Math.max(S.dayHigh, meta.regularMarketDayHigh) : +meta.regularMarketDayHigh.toFixed(2);
+    if (ptIsToday && Number.isFinite(meta.regularMarketDayLow)) S.dayLow = Number.isFinite(S.dayLow) ? Math.min(S.dayLow, meta.regularMarketDayLow) : +meta.regularMarketDayLow.toFixed(2);
+  }
   let last = null;
   if (Number.isFinite(price) && Number.isFinite(pt)) { last = applyTick(sym, +price.toFixed(2), pt); S.price = +price.toFixed(2); S.priceAt = pt; }
-  if (Number.isFinite(meta.chartPreviousClose)) S.prevClose = meta.chartPreviousClose; else if (Number.isFinite(meta.previousClose)) S.prevClose = meta.previousClose;
+  // Only fall back to Yahoo chartPreviousClose when TradingView has not supplied exact exchange prevClose for this day
+  if (!S.prevClose || S.tvPrevDay !== nowDay) {
+    if (Number.isFinite(meta.previousClose)) S.prevClose = meta.previousClose;
+    else if (Number.isFinite(meta.chartPreviousClose)) S.prevClose = meta.chartPreviousClose;
+  }
   S.source = 'Yahoo Finance'; S.lastOk = Date.now(); S.fails = 0; S.lastErr = '';
   if (S.ver !== before || S.price !== S._sentPrice || pt !== S._sentPt) {
     S._sentPrice = S.price;
@@ -939,7 +1003,7 @@ async function pollYahoo(sym) {
 async function pollTradingView() {
   const postData = JSON.stringify({
     symbols: { tickers: ['NSE:NIFTY', 'NSE:BANKNIFTY'] },
-    columns: ['close', 'open', 'high', 'low']
+    columns: ['close', 'open', 'high', 'low', 'change_abs']
   });
   return new Promise((ok, fail) => {
     const req = https.request({
@@ -958,6 +1022,7 @@ async function pollTradingView() {
           const j = JSON.parse(d);
           if (j && Array.isArray(j.data)) {
             const now = Math.floor(Date.now() / 1000);
+            const today = dayOf(now);
             for (const item of j.data) {
               const sym = item.s === 'NSE:NIFTY' ? 'NIFTY' : item.s === 'NSE:BANKNIFTY' ? 'BANKNIFTY' : null;
               if (!sym) continue;
@@ -965,6 +1030,19 @@ async function pollTradingView() {
               const price = item.d && item.d[0];
               if (Number.isFinite(price) && price > 0) {
                 const p = +price.toFixed(2);
+                const dOpen = item.d[1], dHigh = item.d[2], dLow = item.d[3], dChgAbs = item.d[4];
+                if (S.dayKey !== today) {
+                  S.dayKey = today;
+                  S.dayOpen = null; S.dayHigh = null; S.dayLow = null;
+                }
+                if (Number.isFinite(dOpen) && dOpen > 0) S.dayOpen = +dOpen.toFixed(2);
+                if (Number.isFinite(dHigh) && dHigh > 0) S.dayHigh = +dHigh.toFixed(2);
+                if (Number.isFinite(dLow) && dLow > 0) S.dayLow = +dLow.toFixed(2);
+                if (Number.isFinite(dChgAbs)) {
+                  S.prevClose = +(p - dChgAbs).toFixed(2);
+                  S.tvPrevCloseAt = Date.now();
+                  S.tvPrevDay = today;
+                }
                 const last = applyTick(sym, p, now);
                 S.price = p;
                 S.priceAt = now;
@@ -997,33 +1075,38 @@ async function pollOldSite(sym) {
 }
 function marketOpenNow() { const now = Date.now() / 1000, m = minOfDay(now), wd = new Date((now + IST) * 1000).getUTCDay(); return wd >= 1 && wd <= 5 && m >= OPEN_MIN - 1 && m <= CLOSE_MIN + 2; }
 function recentlyTicked() { const now = Date.now() / 1000; return Object.values(store).some(S => now - S.priceAt < 180); }
-let pollTimer = null, tvFails = 0, lastYahooPoll = 0;
+let pollTimer = null, tvFails = 0, lastYahooPoll = 0, lastTvPoll = 0;
 async function pollLoop() {
   const fast = marketOpenNow() || recentlyTicked();
   const now = Date.now();
-
-  // 1. High-frequency live tick updates directly from TradingView (every 500ms)
-  if (fast) {
-    try {
-      await pollTradingView();
-      tvFails = 0;
-    } catch (e) {
-      tvFails++;
+  try {
+    // 1. Periodic Yahoo Finance sync for full candle data (every 5s during market, or every idle cycle, or on TV fallback)
+    if (!fast || tvFails > 0 || now - lastYahooPoll >= 5000) {
+      lastYahooPoll = now;
+      await Promise.all(Object.keys(SYMBOLS).map(async sym => {
+        const S = store[sym];
+        try { await pollYahoo(sym); }
+        catch (e) { S.fails++; S.lastErr = 'Yahoo: ' + e.message; if (S.fails >= 5 && fast) { try { await pollOldSite(sym); } catch (e2) { S.lastErr += ' | history site: ' + e2.message; } } }
+      }));
     }
-  }
 
-  // 2. Periodic Yahoo Finance sync for full candle data (every 5s or on fallback)
-  if (!fast || tvFails > 0 || now - lastYahooPoll >= 5000) {
-    lastYahooPoll = now;
-    await Promise.all(Object.keys(SYMBOLS).map(async sym => {
-      const S = store[sym];
-      try { await pollYahoo(sym); }
-      catch (e) { S.fails++; S.lastErr = 'Yahoo: ' + e.message; if (S.fails >= 5 && fast) { try { await pollOldSite(sym); } catch (e2) { S.lastErr += ' | history site: ' + e2.message; } } }
-    }));
+    // 2. Authoritative live/settled quotes from TradingView (every 500ms in market hours, every 60s when idle)
+    if (fast || now - lastTvPoll >= 60000) {
+      lastTvPoll = now;
+      try {
+        await pollTradingView();
+        tvFails = 0;
+      } catch (e) {
+        tvFails++;
+      }
+    }
+    checkMarketAlerts();
+    runCloudStrats();
+  } catch (err) {
+    log('Poll loop error:', err.message || String(err));
+  } finally {
+    pollTimer = setTimeout(pollLoop, fast ? 500 : IDLE_POLL_MS);
   }
-  checkMarketAlerts();
-  runCloudStrats();
-  pollTimer = setTimeout(pollLoop, fast ? 500 : IDLE_POLL_MS);
 }
 
 /* ---------- CSV import ---------- */
@@ -1424,24 +1507,34 @@ async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
             ].join('\n');
             sendTelegramSingle(token, chatId, resp).catch(() => {});
           }
-        } else if (text === '/status' || text === 'status') {
+        } else if (text === '/status' || text === 'status' || text === '/market' || text === 'market') {
           const d = new Date(Date.now() + IST * 1000);
           let h = d.getUTCHours(), mi = d.getUTCMinutes();
           const ap = h >= 12 ? 'PM' : 'AM';
           h = h % 12; if (!h) h = 12;
           const timeStr = `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')} ${ap}`;
-          const n = store.NIFTY, b = store.BANKNIFTY;
+          const today = dayOf(Math.floor(Date.now() / 1000));
+          const nSum = getDailyMarketSummary('NIFTY', today);
+          const bSum = getDailyMarketSummary('BANKNIFTY', today);
+          const fmtLine = (icon, label, sum) => {
+            if (!sum || !sum.close) return `${icon} <b>${label}</b>: —`;
+            const chg = sum.pct != null ? ` (${sum.diff >= 0 ? '+' : ''}${sum.diff.toFixed(2)} | ${sum.diff >= 0 ? '+' : ''}${sum.pct.toFixed(2)}%)` : '';
+            const extra = (sum.open != null && sum.low != null && sum.high != null)
+              ? `\n   <i>Open:</i> ${sum.open.toFixed(2)} | <i>Range:</i> ${sum.low.toFixed(2)} – ${sum.high.toFixed(2)}`
+              : '';
+            return `${icon} <b>${label}</b>: ${sum.close.toFixed(2)} Pts.${chg}${extra}`;
+          };
           const resp = [
             '⚡ <b>TRADEX SYSTEM STATUS</b>',
             '━━━━━━━━━━━━━━━━━━━━━',
             `📈 <b>Market Status</b>: ${marketOpenNow() ? 'OPEN ✅' : 'CLOSED ⏸️'}`,
             `⏰ <b>Server Time</b>: ${timeStr} IST`,
-            `🎯 <b>NIFTY 50</b>: ${n && n.price ? n.price.toFixed(2) : '—'} Pts.`,
-            `🏦 <b>BANK NIFTY</b>: ${b && b.price ? b.price.toFixed(2) : '—'} Pts.`,
+            fmtLine('🎯', 'NIFTY 50', nSum),
+            fmtLine('🏦', 'BANK NIFTY', bSum),
             `🤖 <b>Cloud Strategies</b>: ${cloudStrats.length} active`,
             `🔔 <b>Alert Notifications</b>: ${telegramConfig.enabled ? 'Enabled' : 'Disabled'}`,
             '━━━━━━━━━━━━━━━━━━━━━',
-            'Send /info to view open trades.'
+            'Send /info to view open trades • /market for live quotes.'
           ].join('\n');
           sendTelegramSingle(token, chatId, resp).catch(() => {});
         } else if (['/strategies', '/strategy', '/strategies_on', '/strategy_on', '/strategies_off', '/strategy_off'].includes(text)) {
@@ -1495,12 +1588,12 @@ async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
             '<b>Available Commands:</b>',
             '• /strategies — Start or stop live strategy BUY/SELL &amp; exit alerts (your chat only)',
             '   ↳ /strategies_on  |  /strategies_off',
-            '• /status — View live NIFTY 50 &amp; BANK NIFTY market data &amp; market state',
+            '• /status or /market — View live NIFTY 50 &amp; BANK NIFTY market data &amp; market state',
             '• /info — View active trade positions &amp; running strategy details',
             '• /help — Show this commands guide',
             '━━━━━━━━━━━━━━━━━━━━━',
             `🔔 <b>Your Live Strategy Alerts:</b> ${stratOn ? '<b>ON ✅</b>' : '<b>OFF ⏸️</b> (send /strategies_on to enable)'}`,
-            '📡 Market Open/Close summaries (09:15 / 15:30 IST) are delivered automatically.'
+            '📡 Market Open/Close summaries (09:15 / 15:31 IST) are delivered automatically.'
           ].join('\n');
           sendTelegramSingle(token, chatId, resp).catch(() => {});
         }

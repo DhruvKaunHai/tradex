@@ -199,7 +199,9 @@ function sliceData(d) {
 }
 async function runStrat(S, quiet) {
   const sc = scripts.find(x => x.id === S.scriptId), full = A.data[key(A.symbol, A.tf)]; if (!sc || !full || !full.t.length) return;
-  const sym = A.symbol, tf = A.tf, { offset, data } = sliceData(full), n = full.t.length; S.busy = true; S.name = sc.name; paintDock();
+  const sym = A.symbol, tf = A.tf, { offset, data } = sliceData(full), n = full.t.length;
+  S.name = sc.name;
+  if (!quiet || !S.result) { S.busy = true; paintDock(); }
   const num = v => (v === '' || v == null ? null : +v);
   try {
     const r = await runPine(sc.code, data, { tf, symbol: sym, inputs: S.inputs || {}, capital: num(settings.capital), qty: num(settings.qty), commission: num(settings.commission), slippage: num(settings.slippage), pooc: settings.pooc }, p => { if (!quiet && S.scriptId === curId) $('#prog').style.width = Math.round(p * 100) + '%'; });
@@ -523,109 +525,167 @@ document.addEventListener('click', e => {
   if (!e.target.closest('.strat-menu')) closeAllStratMenus();
 });
 
+function stratSubHtml(S, M) {
+  if (S.error) return `<span class="down">Line ${S.error.line || '?'}: ${esc(S.error.message)}</span>`;
+  if (M) return `<span class="${cls(M.all.pts)}" style="font-weight:800">${M.all.pts >= 0 ? '+' : '−'}${Math.abs(M.all.pts).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts</span><span>${M.all.n} trades</span><span>${M.all.winRate.toFixed(0)}% won</span><span>DD ${M.dd.maxPct.toFixed(1)}%</span><span class="${cls(M.net)}" style="opacity:.75">${sinr(M.net)}</span>`;
+  return S.result ? '<span>Indicator, no trades</span>' : '<span>Waiting</span>';
+}
+
+function stratEyeHtml(vis) {
+  return vis
+    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20M9.88 9.88a3 3 0 1 0 4.24 4.24M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/></svg>Hide on Chart`
+    : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>Show on Chart`;
+}
+
 function paintDock() {
   paintDockTabs();
   const el = $('#stratList');
   if (!A.strats.length) {
-    el.innerHTML = `<div class="empty" style="padding:20px 8px"><p>No strategy on the chart. Add as many as you like, they all run on the full history.</p><button class="btn primary" data-go="editor">Write or pick a strategy</button></div>`;
+    if (el.dataset.empty !== '1') {
+      el.dataset.empty = '1';
+      el.dataset.sig = '';
+      el.innerHTML = `<div class="empty" style="padding:20px 8px"><p>No strategy on the chart. Add as many as you like, they all run on the full history.</p><button class="btn primary" data-go="editor">Write or pick a strategy</button></div>`;
+    }
   } else {
-    el.innerHTML = A.strats.map(S => {
-      const M = inPeriod(S).metrics;
-      const isSel = selectedChartIds.has(S.id);
-      return `<div class="strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''} ${dockSelectMode ? 'selectable' : ''} ${isSel ? 'selected' : ''}" data-id="${S.id}">
-        ${dockSelectMode
-          ? `<input type="checkbox" class="strat-check" ${isSel ? 'checked' : ''} aria-label="Select strategy">`
-          : `<i class="dot" style="background:${S.color}"></i>`
-        }
-        <span class="nm" title="${esc(S.name || '')}">${esc(S.name || 'Strategy')}</span>
-        ${dockSelectMode
-          ? `<span style="width:26px"></span>`
-          : `<div class="strat-menu">
-              <button class="strat-menu-btn" data-m="btn" title="Options" aria-label="Strategy options">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
-              </button>
-              <div class="strat-dropdown hide">
-                <button data-a="cloud">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
-                  Deploy to Cloud
-                </button>
-                <button data-a="eye">
-                  ${S.visible
-                    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20M9.88 9.88a3 3 0 1 0 4.24 4.24M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/></svg>Hide on Chart`
-                    : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>Show on Chart`
-                  }
-                </button>
-                <button data-a="edit">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-                  Edit Script
-                </button>
-                <div class="menu-sep"></div>
-                <button data-a="del" class="menu-danger">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-                  Remove from Chart
-                </button>
-              </div>
-            </div>`
-        }
-        <span class="sub">
-          ${S.error ? `<span class="down">Line ${S.error.line || '?'}: ${esc(S.error.message)}</span>` : M ? `<span class="${cls(M.all.pts)}" style="font-weight:800">${M.all.pts >= 0 ? '+' : '−'}${Math.abs(M.all.pts).toLocaleString('en-IN', { maximumFractionDigits: 0 })} pts</span><span>${M.all.n} trades</span><span>${M.all.winRate.toFixed(0)}% won</span><span>DD ${M.dd.maxPct.toFixed(1)}%</span><span class="${cls(M.net)}" style="opacity:.75">${sinr(M.net)}</span>` : S.result ? '<span>Indicator, no trades</span>' : '<span>Waiting</span>'}
-        </span>
-      </div>`;
-    }).join('');
-
-    $$('.strat', el).forEach(row => {
-      const S = A.strats.find(s => s.id === row.dataset.id);
-      if (dockSelectMode) {
-        row.onclick = ev => {
-          ev.stopPropagation();
-          if (selectedChartIds.has(S.id)) selectedChartIds.delete(S.id);
-          else selectedChartIds.add(S.id);
-          updateBatchBar();
-          paintDock();
-        };
-        return;
-      }
-      const mBtn = row.querySelector('[data-m="btn"]');
-      const mDrop = row.querySelector('.strat-dropdown');
-      if (mBtn && mDrop) {
-        mBtn.onclick = ev => {
-          ev.stopPropagation();
-          const wasHidden = mDrop.classList.contains('hide');
-          closeAllStratMenus();
-          if (wasHidden) {
-            const r = mBtn.getBoundingClientRect();
-            if (window.innerHeight - r.bottom < 190) mDrop.classList.add('drop-up');
-            else mDrop.classList.remove('drop-up');
-            mDrop.classList.remove('hide');
-            row.classList.add('menu-open');
+    const nextSig = (dockSelectMode ? '1:' : '0:') + A.strats.map(s => s.id).join('|');
+    if (el.dataset.empty === '1' || el.dataset.sig !== nextSig) {
+      el.dataset.empty = '0';
+      el.dataset.sig = nextSig;
+      el.innerHTML = A.strats.map(S => {
+        const M = inPeriod(S).metrics;
+        const isSel = selectedChartIds.has(S.id);
+        return `<div class="strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''} ${dockSelectMode ? 'selectable' : ''} ${isSel ? 'selected' : ''}" data-id="${S.id}" data-vis="${S.visible ? '1' : '0'}">
+          ${dockSelectMode
+            ? `<input type="checkbox" class="strat-check" ${isSel ? 'checked' : ''} aria-label="Select strategy">`
+            : `<i class="dot" style="background:${S.color}"></i>`
           }
-        };
-      }
-      $$('.strat-dropdown button', row).forEach(b => (b.onclick = async ev => {
-        ev.stopPropagation();
-        closeAllStratMenus();
-        const a = b.dataset.a;
-        if (a === 'cloud') {
-          const sc = scripts.find(x => x.id === S.scriptId);
-          if (!sc) return toast('Could not find strategy script', true);
-          deployScriptToCloud(S.scriptId, S.name, sc.code, S.inputs);
+          <span class="nm" title="${esc(S.name || '')}">${esc(S.name || 'Strategy')}</span>
+          ${dockSelectMode
+            ? `<span style="width:26px"></span>`
+            : `<div class="strat-menu">
+                <button class="strat-menu-btn" data-m="btn" title="Options" aria-label="Strategy options">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
+                </button>
+                <div class="strat-dropdown hide">
+                  <button data-a="cloud">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+                    Deploy to Cloud
+                  </button>
+                  <button data-a="eye">${stratEyeHtml(S.visible)}</button>
+                  <button data-a="edit">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                    Edit Script
+                  </button>
+                  <div class="menu-sep"></div>
+                  <button data-a="del" class="menu-danger">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                    Remove from Chart
+                  </button>
+                </div>
+              </div>`
+          }
+          <span class="sub">${stratSubHtml(S, M)}</span>
+        </div>`;
+      }).join('');
+
+      $$('.strat', el).forEach(row => {
+        const S = A.strats.find(s => s.id === row.dataset.id);
+        if (dockSelectMode) {
+          row.onclick = ev => {
+            ev.stopPropagation();
+            if (selectedChartIds.has(S.id)) selectedChartIds.delete(S.id);
+            else selectedChartIds.add(S.id);
+            updateBatchBar();
+            paintDock();
+          };
           return;
         }
-        if (a === 'eye') { S.visible = !S.visible; }
-        else if (a === 'del') { A.strats = A.strats.filter(x => x !== S); }
-        else if (a === 'edit') { openScript(S.scriptId); go('editor'); return; }
-        saveOnChart(); paintDock(); pushLayers(); paintLegend();
-      }));
-      row.onclick = () => { if (S.metrics) { A.rep.sid = S.id; go('report'); } };
-      row.style.cursor = S.metrics ? 'pointer' : 'default';
-    });
+        const mBtn = row.querySelector('[data-m="btn"]');
+        const mDrop = row.querySelector('.strat-dropdown');
+        if (mBtn && mDrop) {
+          mBtn.onclick = ev => {
+            ev.stopPropagation();
+            const wasHidden = mDrop.classList.contains('hide');
+            closeAllStratMenus();
+            if (wasHidden) {
+              const r = mBtn.getBoundingClientRect();
+              if (window.innerHeight - r.bottom < 190) mDrop.classList.add('drop-up');
+              else mDrop.classList.remove('drop-up');
+              mDrop.classList.remove('hide');
+              row.classList.add('menu-open');
+            }
+          };
+        }
+        $$('.strat-dropdown button', row).forEach(b => (b.onclick = async ev => {
+          ev.stopPropagation();
+          closeAllStratMenus();
+          const a = b.dataset.a;
+          if (a === 'cloud') {
+            const sc = scripts.find(x => x.id === S.scriptId);
+            if (!sc) return toast('Could not find strategy script', true);
+            deployScriptToCloud(S.scriptId, S.name, sc.code, S.inputs);
+            return;
+          }
+          if (a === 'eye') { S.visible = !S.visible; }
+          else if (a === 'del') { A.strats = A.strats.filter(x => x !== S); }
+          else if (a === 'edit') { openScript(S.scriptId); go('editor'); return; }
+          saveOnChart(); paintDock(); pushLayers(); paintLegend();
+        }));
+        row.onclick = () => { if (S.metrics) { A.rep.sid = S.id; go('report'); } };
+        row.style.cursor = S.metrics ? 'pointer' : 'default';
+      });
+    } else {
+      // Patch existing DOM rows in-place so sidebar never blinks or resets menus
+      $$('.strat', el).forEach(row => {
+        const S = A.strats.find(s => s.id === row.dataset.id);
+        if (!S) return;
+        const M = inPeriod(S).metrics;
+        const isSel = selectedChartIds.has(S.id);
+        const menuOpen = row.classList.contains('menu-open');
+        const nextCls = `strat ${S.visible ? '' : 'off'} ${S.busy ? 'busy' : ''} ${dockSelectMode ? 'selectable' : ''} ${isSel ? 'selected' : ''} ${menuOpen ? 'menu-open' : ''}`.trim().replace(/\s+/g, ' ');
+        if (row.className !== nextCls) row.className = nextCls;
+        if (dockSelectMode) {
+          const chk = row.querySelector('.strat-check');
+          if (chk && chk.checked !== isSel) chk.checked = isSel;
+        } else {
+          const dot = row.querySelector('.dot');
+          if (dot && dot.style.background !== S.color) dot.style.background = S.color;
+          const eyeBtn = row.querySelector('[data-a="eye"]');
+          const visStr = S.visible ? '1' : '0';
+          if (eyeBtn && row.dataset.vis !== visStr) {
+            row.dataset.vis = visStr;
+            eyeBtn.innerHTML = stratEyeHtml(S.visible);
+          }
+        }
+        const nm = row.querySelector('.nm');
+        const nameText = S.name || 'Strategy';
+        if (nm && nm.textContent !== nameText) {
+          nm.textContent = nameText;
+          nm.title = S.name || '';
+        }
+        const sub = row.querySelector('.sub');
+        if (sub) {
+          const nextSub = stratSubHtml(S, M);
+          if (sub.dataset.html !== nextSub) {
+            sub.dataset.html = nextSub;
+            sub.innerHTML = nextSub;
+          }
+        }
+        const wantCursor = S.metrics ? 'pointer' : 'default';
+        if (row.style.cursor !== wantCursor) row.style.cursor = wantCursor;
+      });
+    }
   }
-  paintCloudList();
+  if (dockTab === 'cloud' || !$('#cloudList')?.dataset.init) paintCloudList();
 }
 
 function paintCloudList() {
   const el = $('#cloudList');
   if (!el) return;
+  const sig = JSON.stringify([dockSelectMode, [...selectedCloudIds], cloudStrats.map(cs => [cs.id, cs.name, cs.symbol, cs.tf, cs.enabled, cs.lastError])]);
+  if (el.dataset.sig === sig) return;
+  el.dataset.init = '1';
+  el.dataset.sig = sig;
   if (!cloudStrats.length) {
     el.innerHTML = `<div class="empty" style="padding:20px 8px">
       <p style="margin-bottom:10px;line-height:1.5">No 24/7 cloud strategies active. Any strategy deployed to Cloud sends Telegram alerts 24/7 even when your browser and PC are closed.</p>
