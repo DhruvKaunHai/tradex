@@ -12,7 +12,7 @@ const WEB = path.join(ROOT, 'web');
 const DATA = process.env.DATA_DIR || path.join(ROOT, 'data');
 const SEED_URL = (process.env.SEED_URL || 'https://tradex-terminal-de4w.onrender.com').replace(/\/$/, '');
 const YAHOO = (process.env.YAHOO_BASE || 'https://query1.finance.yahoo.com').replace(/\/$/, '');
-const POLL_MS = Math.max(250, +process.env.POLL_MS || 500);
+const POLL_MS = Math.max(1000, +process.env.POLL_MS || 1500);
 const IDLE_POLL_MS = Math.max(500, +process.env.IDLE_POLL_MS || 60000); // how often to look when the market is shut
 const ORIGIN = process.env.ALLOW_ORIGIN || '*';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
@@ -559,7 +559,6 @@ function getDailyMarketSummary(sym, today) {
 async function sendMarketCloseAlert(dateKey, today) {
   try {
     await Promise.all(Object.keys(SYMBOLS).map(sym => pollYahoo(sym).catch(() => {})));
-    await pollTradingView().catch(() => {});
   } catch (_) {}
 
   const formatIdxBlock = (icon, title, sym) => {
@@ -987,11 +986,8 @@ async function pollYahoo(sym) {
   }
   let last = null;
   if (Number.isFinite(price) && Number.isFinite(pt)) { last = applyTick(sym, +price.toFixed(2), pt); S.price = +price.toFixed(2); S.priceAt = pt; }
-  // Only fall back to Yahoo chartPreviousClose when TradingView has not supplied exact exchange prevClose for this day
-  if (!S.prevClose || S.tvPrevDay !== nowDay) {
-    if (Number.isFinite(meta.previousClose)) S.prevClose = meta.previousClose;
-    else if (Number.isFinite(meta.chartPreviousClose)) S.prevClose = meta.chartPreviousClose;
-  }
+  if (Number.isFinite(meta.previousClose)) S.prevClose = meta.previousClose;
+  else if (Number.isFinite(meta.chartPreviousClose)) S.prevClose = meta.chartPreviousClose;
   S.source = 'Yahoo Finance'; S.lastOk = Date.now(); S.fails = 0; S.lastErr = '';
   if (S.ver !== before || S.price !== S._sentPrice || pt !== S._sentPt) {
     S._sentPrice = S.price;
@@ -999,72 +995,6 @@ async function pollYahoo(sym) {
     const k = S.t.length - 1;
     broadcast({ type: 'tick', s: sym, bar: last || [S.t[k], S.o[k], S.h[k], S.l[k], S.c[k]], price: S.price, at: S.priceAt, prev: S.prevClose });
   }
-}
-async function pollTradingView() {
-  const postData = JSON.stringify({
-    symbols: { tickers: ['NSE:NIFTY', 'NSE:BANKNIFTY'] },
-    columns: ['close', 'open', 'high', 'low', 'change_abs']
-  });
-  return new Promise((ok, fail) => {
-    const req = https.request({
-      hostname: 'scanner.tradingview.com',
-      path: '/india/scan',
-      method: 'POST',
-      headers: {
-        'User-Agent': UA,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      }
-    }, r => {
-      let d = ''; r.on('data', c => d += c);
-      r.on('end', () => {
-        try {
-          const j = JSON.parse(d);
-          if (j && Array.isArray(j.data)) {
-            const now = Math.floor(Date.now() / 1000);
-            const today = dayOf(now);
-            for (const item of j.data) {
-              const sym = item.s === 'NSE:NIFTY' ? 'NIFTY' : item.s === 'NSE:BANKNIFTY' ? 'BANKNIFTY' : null;
-              if (!sym) continue;
-              const S = store[sym];
-              const price = item.d && item.d[0];
-              if (Number.isFinite(price) && price > 0) {
-                const p = +price.toFixed(2);
-                const dOpen = item.d[1], dHigh = item.d[2], dLow = item.d[3], dChgAbs = item.d[4];
-                if (S.dayKey !== today) {
-                  S.dayKey = today;
-                  S.dayOpen = null; S.dayHigh = null; S.dayLow = null;
-                }
-                if (Number.isFinite(dOpen) && dOpen > 0) S.dayOpen = +dOpen.toFixed(2);
-                if (Number.isFinite(dHigh) && dHigh > 0) S.dayHigh = +dHigh.toFixed(2);
-                if (Number.isFinite(dLow) && dLow > 0) S.dayLow = +dLow.toFixed(2);
-                if (Number.isFinite(dChgAbs)) {
-                  S.prevClose = +(p - dChgAbs).toFixed(2);
-                  S.tvPrevCloseAt = Date.now();
-                  S.tvPrevDay = today;
-                }
-                const last = applyTick(sym, p, now);
-                S.price = p;
-                S.priceAt = now;
-                S.source = 'TradingView';
-                S.lastOk = Date.now();
-                if (S.price !== S._sentPrice) {
-                  S._sentPrice = S.price;
-                  const k = S.t.length - 1;
-                  broadcast({ type: 'tick', s: sym, bar: last || [S.t[k], S.o[k], S.h[k], S.l[k], S.c[k]], price: S.price, at: S.priceAt, prev: S.prevClose });
-                }
-              }
-            }
-          }
-          ok();
-        } catch (e) { fail(e); }
-      });
-    });
-    req.on('error', fail);
-    req.setTimeout(3500, () => { req.destroy(); fail(new Error('timeout')); });
-    req.write(postData);
-    req.end();
-  });
 }
 async function pollOldSite(sym) {
   const S = store[sym];
@@ -1075,37 +1005,27 @@ async function pollOldSite(sym) {
 }
 function marketOpenNow() { const now = Date.now() / 1000, m = minOfDay(now), wd = new Date((now + IST) * 1000).getUTCDay(); return wd >= 1 && wd <= 5 && m >= OPEN_MIN - 1 && m <= CLOSE_MIN + 2; }
 function recentlyTicked() { const now = Date.now() / 1000; return Object.values(store).some(S => now - S.priceAt < 180); }
-let pollTimer = null, tvFails = 0, lastYahooPoll = 0, lastTvPoll = 0;
+let pollTimer = null;
 async function pollLoop() {
   const fast = marketOpenNow() || recentlyTicked();
-  const now = Date.now();
   try {
-    // 1. Periodic Yahoo Finance sync for full candle data (every 5s during market, or every idle cycle, or on TV fallback)
-    if (!fast || tvFails > 0 || now - lastYahooPoll >= 5000) {
-      lastYahooPoll = now;
-      await Promise.all(Object.keys(SYMBOLS).map(async sym => {
-        const S = store[sym];
-        try { await pollYahoo(sym); }
-        catch (e) { S.fails++; S.lastErr = 'Yahoo: ' + e.message; if (S.fails >= 5 && fast) { try { await pollOldSite(sym); } catch (e2) { S.lastErr += ' | history site: ' + e2.message; } } }
-      }));
-    }
-
-    // 2. Authoritative live/settled quotes from TradingView (every 500ms in market hours, every 60s when idle)
-    if (fast || now - lastTvPoll >= 60000) {
-      lastTvPoll = now;
-      try {
-        await pollTradingView();
-        tvFails = 0;
-      } catch (e) {
-        tvFails++;
+    await Promise.all(Object.keys(SYMBOLS).map(async sym => {
+      const S = store[sym];
+      try { await pollYahoo(sym); }
+      catch (e) {
+        S.fails++;
+        S.lastErr = 'Yahoo: ' + e.message;
+        if (S.fails >= 5 && fast) {
+          try { await pollOldSite(sym); } catch (e2) { S.lastErr += ' | history site: ' + e2.message; }
+        }
       }
-    }
+    }));
     checkMarketAlerts();
     runCloudStrats();
   } catch (err) {
     log('Poll loop error:', err.message || String(err));
   } finally {
-    pollTimer = setTimeout(pollLoop, fast ? 500 : IDLE_POLL_MS);
+    pollTimer = setTimeout(pollLoop, fast ? POLL_MS : IDLE_POLL_MS);
   }
 }
 
