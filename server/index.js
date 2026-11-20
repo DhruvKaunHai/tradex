@@ -1309,8 +1309,14 @@ const server = http.createServer(async (req, res) => {
       if (!store[sym] || ![5, 15, 30].includes(tf)) return send(req, res, 400, { error: 'Unknown symbol or timeframe' });
       const S = store[sym]; let c = S.cache[tf];
       if (!c || c.ver !== S.ver) { const a = aggregate(sym, tf); c = S.cache[tf] = { ver: S.ver, gz: zlib.gzipSync(JSON.stringify({ symbol: sym, tf, t: a.t, o: a.o, h: a.h, l: a.l, c: a.c }), { level: 6 }) }; }
-      if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) return send(req, res, 200, c.gz, 'application/json', { 'Content-Encoding': 'gzip', 'Cache-Control': 'no-store' });
-      return send(req, res, 200, zlib.gunzipSync(c.gz), 'application/json', { 'Cache-Control': 'no-store', 'Content-Encoding': 'identity' });
+      const etag = `"${sym}_${tf}_${S.ver}"`;
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { 'ETag': etag, 'Cache-Control': 'public, max-age=2', 'Access-Control-Allow-Origin': ORIGIN });
+        return res.end();
+      }
+      const headers = { 'ETag': etag, 'Cache-Control': 'public, max-age=2' };
+      if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) return send(req, res, 200, c.gz, 'application/json', Object.assign({ 'Content-Encoding': 'gzip' }, headers));
+      return send(req, res, 200, zlib.gunzipSync(c.gz), 'application/json', Object.assign({ 'Content-Encoding': 'identity' }, headers));
     }
     if (p === '/api/stream') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'Access-Control-Allow-Origin': ORIGIN, 'X-Accel-Buffering': 'no' });
@@ -1330,7 +1336,8 @@ const server = http.createServer(async (req, res) => {
     let rel = p === '/' ? '/index.html' : p === '/app' ? '/app.html' : p; rel = path.normalize(rel).replace(/^([/\\])+/, '');
     const file = path.join(WEB, rel);
     if (!file.startsWith(WEB) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) return send(req, res, 404, 'Not found', 'text/plain');
-    return send(req, res, 200, fs.readFileSync(file), TYPES[path.extname(file)] || 'application/octet-stream', { 'Cache-Control': 'no-cache' });
+    const isHtml = rel.endsWith('.html');
+    return send(req, res, 200, fs.readFileSync(file), TYPES[path.extname(file)] || 'application/octet-stream', { 'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=86400' });
   } catch (e) { log('request failed:', e.message); try { send(req, res, 500, { error: 'Server error' }); } catch (_) { /* reply already started */ } }
 });
 
