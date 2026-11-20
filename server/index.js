@@ -1542,6 +1542,23 @@ async function boot() {
     pollTelegramUpdates(2).finally(() => setTimeout(scheduleTgPoll, 1500));
   };
   scheduleTgPoll();
+
+  // Keep-alive self-ping: Prevents Render free instances from idling/spinning down after 15 minutes of inactivity
+  const keepAliveUrl = (process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || 'https://tradex-dhruv.onrender.com').replace(/\/$/, '');
+  if (keepAliveUrl && keepAliveUrl.startsWith('http')) {
+    const pingSelf = () => {
+      try {
+        const u = new URL('/api/status', keepAliveUrl);
+        const mod = u.protocol === 'https:' ? https : http;
+        const req = mod.get(u.href, { headers: { 'User-Agent': UA }, timeout: 15000 }, res => {
+          res.resume();
+        });
+        req.on('error', () => {});
+      } catch (_) {}
+    };
+    setInterval(pingSelf, 10 * 60 * 1000);
+    setTimeout(pingSelf, 60 * 1000);
+  }
 }
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { for (const sym in SYMBOLS) save(sym); process.exit(0); });
 boot();
