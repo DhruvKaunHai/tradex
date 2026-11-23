@@ -11,8 +11,26 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const toast = (msg, err) => { const t = document.createElement('div'); t.className = 'toast' + (err ? ' err' : ''); t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), err ? 6000 : 3200); };
 const download = (name, text) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
 
+(function initTelegramMiniApp() {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg) return;
+  try {
+    tg.ready();
+    tg.expand();
+    if (tg.setHeaderColor) tg.setHeaderColor('#0b0e14');
+    if (tg.setBackgroundColor) tg.setBackgroundColor('#0b0e14');
+  } catch (e) {}
+})();
+
+const urlParams = new URLSearchParams(window.location.search);
+const urlSym = (urlParams.get('symbol') || '').toUpperCase();
+const urlTf = Number(urlParams.get('tf'));
+const initSym = (urlSym === 'NIFTY' || urlSym === 'BANKNIFTY') ? urlSym : store.get('symbol', 'NIFTY');
+const initTf = [5, 15, 30].includes(urlTf) ? urlTf : store.get('tf', 5);
+
 const settings = Object.assign({ theme: 'dark', capital: '', qty: '', commission: '', slippage: '', from: '', to: '', pooc: false }, store.get('settings', {}));
-const A = { symbol: store.get('symbol', 'NIFTY'), tf: store.get('tf', 5), data: {}, status: {}, strats: [], view: 'chart', rep: {}, trd: {}, cmp: {}, marketOpen: false, serverOk: false, lastTick: 0, period: store.get('period', 'all') };
+const A = { symbol: initSym, tf: initTf, data: {}, status: {}, strats: [], view: 'chart', rep: {}, trd: {}, cmp: {}, marketOpen: false, serverOk: false, lastTick: 0, period: store.get('period', 'all') };
+if (window.location.hash === '#chart') A.view = 'chart';
 let scripts = store.get('scripts', null);
 if (!scripts || !scripts.length) { scripts = TX_SAMPLES.slice(0, 2).map(s => ({ id: uid(), name: s.name, code: s.code, updated: Date.now() })); store.set('scripts', scripts); }
 let curId = store.get('cur', scripts[0].id); if (!scripts.find(s => s.id === curId)) curId = scripts[0].id;

@@ -287,14 +287,57 @@ function fmtAlertTime(sec, refSec) {
 let lastSentHash = '';
 let lastSentTime = 0;
 
-function sendTelegramSingle(token, chatId, text) {
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function makeBtn(text, targetUrl, chatId) {
+  const isPrivate = Number(chatId) > 0;
+  return isPrivate
+    ? { text, web_app: { url: targetUrl } }
+    : { text, url: targetUrl };
+}
+
+function buildStrategyButtons({ stratName, symCode, tf, chatId }) {
+  const paperBase = (process.env.PAPER_TRADEX_URL || 'https://paper-tradex.onrender.com').replace(/\/$/, '');
+  const tradexBase = (process.env.TRADEX_URL || 'https://tradex-home.onrender.com').replace(/\/$/, '');
+
+  const shortName = stratName.length > 16 ? stratName.slice(0, 15) + '…' : stratName;
+  const paperUrl = `${paperBase}/app?strategy=${encodeURIComponent(stratName)}&tf=${encodeURIComponent(tf)}&symbol=${encodeURIComponent(symCode)}&tg=1`;
+  const chartUrl = `${tradexBase}/app.html?symbol=${encodeURIComponent(symCode)}&tf=${encodeURIComponent(tf)}#chart`;
+
+  return {
+    inline_keyboard: [[
+      makeBtn(`📊 Open ${shortName}`, paperUrl, chatId),
+      makeBtn('📈 Live Chart', chartUrl, chatId)
+    ]]
+  };
+}
+
+function buildGeneralButtons(chatId) {
+  const paperBase = (process.env.PAPER_TRADEX_URL || 'https://paper-tradex.onrender.com').replace(/\/$/, '');
+  const tradexBase = (process.env.TRADEX_URL || 'https://tradex-home.onrender.com').replace(/\/$/, '');
+  return {
+    inline_keyboard: [[
+      makeBtn('🧪 Paper-TradeX', `${paperBase}/app?tg=1`, chatId),
+      makeBtn('📈 TradeX Chart', `${tradexBase}/app.html#chart`, chatId)
+    ]]
+  };
+}
+
+function sendTelegramSingle(token, chatId, text, replyMarkup = null) {
   const cleanId = String(chatId || '').trim();
-  const postData = JSON.stringify({
+  const payload = {
     chat_id: cleanId,
     text: text,
     parse_mode: 'HTML',
     disable_web_page_preview: true
-  });
+  };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  const postData = JSON.stringify(payload);
   return new Promise(ok => {
     const req = https.request({
       hostname: 'api.telegram.org',
@@ -327,25 +370,18 @@ function isTelegramUnreachableError(err) {
 
 function buildFriendWelcomeMessage() {
   return [
-    '👋 <b>Welcome to TradeX!</b>',
-    '━━━━━━━━━━━━━━━━━━━━━',
-    'Built by <b>Dhruv</b>, <b>TradeX</b> is a real-time algorithmic trading terminal &amp; cloud alert engine for Indian markets (<b>NIFTY 50</b> &amp; <b>BANK NIFTY</b>).',
-    '',
-    '<b>What TradeX does:</b>',
-    '• 📡 Streams live index market data &amp; runs Pine Script strategies 24/7 on the cloud',
-    '• 🔔 Delivers Market Open (09:15 IST) &amp; Close (15:30 IST) summaries automatically',
-    '• ⚡ Sends real-time BUY / SELL entries &amp; exit PnL alerts (opt-in per chat)',
-    '',
-    '<b>📋 Bot Commands:</b>',
-    '• /strategies — Turn live strategy entry/exit alerts <b>ON / OFF</b> (for your chat only)',
-    '   (Or use /strategies_on or /strategies_off directly)',
-    '• /status or /market — Request live NIFTY 50 &amp; BANK NIFTY market data &amp; session status',
-    '• /info — View currently open trade positions &amp; active strategies',
-    '• /help — Show all commands and your current alert setting',
-    '━━━━━━━━━━━━━━━━━━━━━',
-    '🔕 <b>Live Strategy Alerts: OFF</b> for your Telegram by default.',
-    '👉 Tap /strategies_on (or /strategies) anytime to start receiving live daily strategy alerts!',
-    '🔔 Market Open/Close summaries and /status market data are already active.'
+    '⚡ <b>TRADEX // ALGO TERMINAL</b>',
+    '<i>Architected by Dhruv · NSE Cloud Engine</i>',
+    '<pre><code class="language-SYSTEM">MARKETS ▸ NIFTY 50 · BANK NIFTY',
+    'ENGINES ▸ 24/7 Cloud Pine Execution',
+    'BRIEFS  ▸ 09:15 Open · 15:31 Close',
+    'ALERTS  ▸ Instant BUY/SELL &amp; Exit PnL</code></pre>',
+    '<blockquote expandable><b>◈ COMMAND DECK</b>',
+    '▸ /strategies — Toggle live alerts (this chat)',
+    '▸ /status — Live quotes &amp; engine telemetry',
+    '▸ /info — Active trades &amp; trailing SL/TP',
+    '▸ /help — View command deck</blockquote>',
+    '<i>🔕 Live signals start muted — tap /strategies_on to arm.</i>'
   ].join('\n');
 }
 
@@ -361,7 +397,7 @@ async function sendFriendWelcomeIfNeeded(chatId, customToken, msgContext) {
   if (welcomeInFlight.has(clean)) return welcomeInFlight.get(clean);
   const p = (async () => {
     try {
-      const r = await sendTelegramSingle(token, clean, buildFriendWelcomeMessage());
+      const r = await sendTelegramSingle(token, clean, buildFriendWelcomeMessage(), buildGeneralButtons(clean));
       if (r.ok) {
         const chatMeta = (r.result && r.result.chat) || {};
         const learnedName = `${chatMeta.first_name || ''} ${chatMeta.last_name || ''}`.trim()
@@ -419,7 +455,10 @@ async function sendTelegram(text, customToken, customChatId, skipThrottle = fals
         return { ok: false, chatId: cid, needsStart: !!wr.needsStart, error: wr.error || 'Failed to send welcome message' };
       }
     }
-    return sendTelegramSingle(token, cid, text);
+    const markup = typeof opts.buttons === 'function'
+      ? opts.buttons(cid)
+      : (opts.replyMarkup || null);
+    return sendTelegramSingle(token, cid, text, markup);
   }));
   const firstOk = results.find(r => r.ok);
   if (firstOk) return { ok: true, result: firstOk.result, results };
@@ -561,42 +600,38 @@ async function sendMarketCloseAlert(dateKey, today) {
     await Promise.all(Object.keys(SYMBOLS).map(sym => pollYahoo(sym).catch(() => {})));
   } catch (_) {}
 
-  const formatIdxBlock = (icon, title, sym) => {
+  const formatIdxBlock = (title, sym) => {
     const s = getDailyMarketSummary(sym, today);
     const f = v => (v != null && Number.isFinite(v)) ? v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
-    const diffStr = s && s.prevClose ? ` (${s.diff >= 0 ? '+' : ''}${s.diff.toFixed(2)} / ${s.pct >= 0 ? '+' : ''}${s.pct.toFixed(2)}%)` : '';
-    const rangeStr = (s && s.low != null && s.high != null) ? `${f(s.low)} – ${f(s.high)} Pts.` : '—';
+    const diffStr = s && s.prevClose ? ` (${s.diff >= 0 ? '+' : ''}${s.diff.toFixed(2)} | ${s.pct >= 0 ? '+' : ''}${s.pct.toFixed(2)}%)` : '';
+    const padTitle = (title + '        ').slice(0, 10);
+    const rangeStr = (s && s.low != null && s.high != null) ? `${f(s.low)} – ${f(s.high)}` : '—';
     return [
-      `${icon} <b>${title}</b>`,
-      `   • Open: ${f(s && s.open)} Pts.  |  Close: <b>${f(s && s.close)} Pts.</b>${diffStr}`,
-      `   • Day Range: ${rangeStr}`
+      `${padTitle} ▸ ${f(s && s.close)}${diffStr}`,
+      `  ├─ OPEN  : ${f(s && s.open)}`,
+      `  └─ RANGE : ${rangeStr}`
     ].join('\n');
   };
 
   const openTrades = getOpenCloudTrades();
-  let posSection = '⚡ <b>Open Overnight Positions</b>: 0 active\nAll cloud strategies closed flat before market close.';
+  let posSection = '▸ <b>Overnight</b>  <code>0 active · All flat</code>';
   if (openTrades.length) {
-    posSection = `⚡ <b>Open Overnight Positions (${openTrades.length})</b>:\n` + openTrades.map(ot => {
+    posSection = openTrades.map(ot => {
       const dir = ot.trade.dir > 0 ? 'BUY' : 'SELL';
       const ep = ot.trade.ep.toLocaleString('en-IN', { minimumFractionDigits: 2 });
       const pts = ot.trade.pts != null ? ot.trade.pts : 0;
       const ptsStr = `${pts >= 0 ? '+' : '−'}${Math.abs(pts).toFixed(2)} pts`;
-      return `   • <b>${ot.symName} (${ot.tf}m)</b>: ${dir} @ ${ep} (${ptsStr}) [${ot.stratName}]`;
+      return `▸ <b>${escHtml(ot.symName)} (${ot.tf}m)</b>: ${dir} @ ${ep} (${ptsStr}) [${escHtml(ot.stratName)}]`;
     }).join('\n');
   }
 
   const msg = [
-    '🏁 <b>NSE MARKET CLOSED (03:31 PM IST)</b>',
-    '━━━━━━━━━━━━━━━━━━━━━',
-    formatIdxBlock('📈', 'NIFTY 50', 'NIFTY'),
-    '',
-    formatIdxBlock('🏦', 'BANK NIFTY', 'BANKNIFTY'),
-    '━━━━━━━━━━━━━━━━━━━━━',
-    posSection,
-    '━━━━━━━━━━━━━━━━━━━━━',
-    'Trading session ended. Have a great evening!'
+    '🏁 <b>NSE SESSION // SETTLED</b> <code>15:31 IST</code>',
+    '<pre><code class="language-EOD_REPORT">' + formatIdxBlock('NIFTY 50', 'NIFTY') + '\n\n' + formatIdxBlock('BANK NIFTY', 'BANKNIFTY') + '</code></pre>',
+    '<blockquote expandable><b>◈ OVERNIGHT TELEMETRY</b>\n' + posSection + '</blockquote>',
+    '<i>⟁ Session archived · Standby until 09:15 IST</i>'
   ].join('\n');
-  sendTelegram(msg, null, null, false, { category: 'market' }).catch(() => {});
+  sendTelegram(msg, null, null, false, { category: 'market', buttons: cid => buildGeneralButtons(cid) }).catch(() => {});
 }
 
 function checkMarketAlerts() {
@@ -615,25 +650,21 @@ function checkMarketAlerts() {
     recordSentAlert(openKey);
     const n = store.NIFTY, b = store.BANKNIFTY;
     const openTrades = getOpenCloudTrades();
-    let posLine = '⚡ <b>Open Positions</b>: 0 active (All flat)';
-    if (openTrades.length) {
-      posLine = `⚡ <b>Open Positions (${openTrades.length})</b>:\n` + openTrades.map(ot => {
-        const dir = ot.trade.dir > 0 ? 'BUY' : 'SELL';
-        const ep = ot.trade.ep.toLocaleString('en-IN', { minimumFractionDigits: 2 });
-        return `   • <b>${ot.symName} (${ot.tf}m)</b>: ${dir} @ ${ep} [${ot.stratName}]`;
-      }).join('\n');
-    }
+    const posLine = openTrades.length
+      ? `◈ <b>CARRYOVER</b>  <code>${openTrades.length} ACTIVE</code>`
+      : '◈ <b>OPEN POSITIONS</b>  <code>0 ACTIVE · FLAT</code>';
+    const nPrice = (n && n.price != null) ? n.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—';
+    const bPrice = (b && b.price != null) ? b.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—';
 
     const msg = [
-      '🔔 <b>NSE MARKET IS OPEN (09:15 AM IST)</b>',
-      '━━━━━━━━━━━━━━━━━━━━━',
-      `📈 <b>NIFTY 50</b>: ${n && n.price ? n.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts.`,
-      `🏦 <b>BANK NIFTY</b>: ${b && b.price ? b.price.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—'} Pts.`,
-      posLine,
-      '',
-      '🎯 TradeX is tracking live tick-by-tick. Have a disciplined trading session!'
+      '⚡ <b>NSE SESSION // ONLINE</b> <code>09:15 IST</code>',
+      `<pre><code class="language-MARKET_OPEN">NIFTY 50   ▸ ${nPrice}`,
+      `BANK NIFTY ▸ ${bPrice}`,
+      'FEED       ▸ LIVE TICK STREAM</code></pre>',
+      `<blockquote>${posLine}</blockquote>`,
+      '<i>◈ TradeX Cloud · All scanners armed</i>'
     ].join('\n');
-    sendTelegram(msg, null, null, false, { category: 'market' }).catch(() => {});
+    sendTelegram(msg, null, null, false, { category: 'market', buttons: cid => buildGeneralButtons(cid) }).catch(() => {});
   }
 
   // 2. Market Close Alert at 03:31 PM IST (after official NSE closing settlement)
@@ -814,15 +845,19 @@ function runCloudStrats() {
             const timeStr = fmtIST(entryTime || nowSec);
 
             const msg = [
-              `${icon} <b>NEW TRADE EXECUTED</b>`,
-              '━━━━━━━━━━━━━━━━━━━━━',
-              `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
-              `🎯 <b>Action</b>: ${action} @ ${epStr} Pts.`,
-              `🧠 <b>Strategy</b>: ${stratName}`,
-              `⏰ <b>Time</b>: ${timeStr} IST`
+              `${icon} <b>${action} // ${escHtml(symName)}</b> <code>${tf}M</code>`,
+              '<pre><code class="language-SIGNAL">' +
+              `EXEC   ▸ ${action} @ ${epStr}\n` +
+              `STRAT  ▸ ${escHtml(stratName)}\n` +
+              `CLOCK  ▸ ${timeStr} IST\n` +
+              'STATUS ▸ ARMED · LIVE FEED</code></pre>',
+              '<blockquote>◈ <i>TradeX Cloud Engine · Order Triggered</i></blockquote>'
             ].join('\n');
 
-            sendTelegram(msg, null, null, false, { category: 'strategy' }).catch(() => {});
+            sendTelegram(msg, null, null, false, {
+              category: 'strategy',
+              buttons: cid => buildStrategyButtons({ stratName, symCode: sym, tf, chatId: cid })
+            }).catch(() => {});
           }
         }
 
@@ -841,7 +876,7 @@ function runCloudStrats() {
             const exitTimeStr = fmtAlertTime(exitTime || nowSec);
             const entryTimeStr = fmtAlertTime(entryTime, exitTime || nowSec);
             const resPill = isWin ? `${ptsSign}${ptsAbs} Pts. ✅ WIN` : `${ptsSign}${ptsAbs} Pts. ❌ LOSS`;
-            const reason = t.reason && t.reason !== 'Still open' ? ` (${t.reason})` : '';
+            const reason = t.reason && t.reason !== 'Still open' ? ` (${escHtml(t.reason)})` : '';
 
             const candlesHeld = t.bars != null ? t.bars : (t.xi != null && t.ei != null ? Math.max(1, t.xi - t.ei) : null);
             const isOvernight = entryTime && exitTime && dayOf(entryTime) !== dayOf(exitTime);
@@ -849,19 +884,22 @@ function runCloudStrats() {
               ? `${candlesHeld} candle${candlesHeld === 1 ? '' : 's'}${isOvernight ? ' (overnight)' : ` (${candlesHeld * tf}m)`}`
               : (isOvernight ? 'Overnight' : '—');
 
+            const dir = t.dir > 0 ? 'BUY' : 'SELL';
             const msg = [
-              '🏁 <b>TRADE COMPLETED</b>',
-              '━━━━━━━━━━━━━━━━━━━━━',
-              `📈 <b>Symbol</b>: ${symName} (${tf}m)`,
-              `🎯 <b>Action</b>: EXIT ${t.dir > 0 ? 'BUY' : 'SELL'}${reason}`,
-              `💰 <b>Entry</b>: ${epStr} Pts. (${entryTimeStr} IST)`,
-              `💰 <b>Exit</b>: ${xpStr} Pts. (${exitTimeStr} IST)`,
-              `⏳ <b>Duration</b>: ${durationStr}`,
-              `📊 <b>Result</b>: ${resPill}`,
-              `🧠 <b>Strategy</b>: ${stratName}`
+              `◈ <b>EXIT ${dir} // ${escHtml(symName)}</b> <code>${tf}M</code>${reason}`,
+              '<pre><code class="language-SETTLED">' +
+              `RESULT ▸ ${resPill}\n` +
+              `ENTRY  ▸ ${epStr} (${entryTimeStr})\n` +
+              `EXIT   ▸ ${xpStr} (${exitTimeStr})\n` +
+              `HELD   ▸ ${durationStr}\n` +
+              `STRAT  ▸ ${escHtml(stratName)}</code></pre>`,
+              '<blockquote>⟁ <i>Position closed · Ledger synced</i></blockquote>'
             ].join('\n');
 
-            sendTelegram(msg, null, null, false, { category: 'strategy' }).catch(() => {});
+            sendTelegram(msg, null, null, false, {
+              category: 'strategy',
+              buttons: cid => buildStrategyButtons({ stratName, symCode: sym, tf, chatId: cid })
+            }).catch(() => {});
           }
         }
       }
@@ -1221,13 +1259,14 @@ const server = http.createServer(async (req, res) => {
       h = h % 12; if (!h) h = 12;
       const timeStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')} ${ap}`;
       const text = [
-        '🔔 <b>TRADEX NOTIFICATION TEST</b>',
-        '━━━━━━━━━━━━━━━━━━━━━',
-        '✅ Telegram bot connected successfully!',
-        '📈 Live alerts for BUY / SELL entries, trade exits, and market open/close summaries are active.',
-        `⏰ Time: ${timeStr} IST`
+        '✅ <b>TRADEX // UPLINK VERIFIED</b>',
+        '<pre><code class="language-PING">LINK   ▸ ONLINE (200 OK)',
+        'FEEDS  ▸ SIGNALS · EXITS · BRIEFS',
+        `CLOCK  ▸ ${timeStr} IST</code></pre>`
       ].join('\n');
-      const r = await sendTelegram(text, null, targetChat, true);
+      const r = await sendTelegram(text, null, targetChat, true, {
+        buttons: cid => buildGeneralButtons(cid)
+      });
       return send(req, res, 200, sanitizeTgSendResult(r));
     }
     if (p === '/api/telegram/send' && req.method === 'POST') {
@@ -1242,7 +1281,16 @@ const server = http.createServer(async (req, res) => {
         recordSentAlert(body.key);
       }
       const cat = (body.type === 'entry' || body.type === 'exit') ? 'strategy' : (body.category || 'general');
-      const r = await sendTelegram(body.text, null, null, false, { category: cat });
+      const stratName = body.stratName || body.strategy || body.name;
+      const tgOpts = { category: cat };
+      if (stratName) {
+        const sym = body.symbol || 'NIFTY';
+        const tf = body.tf || 15;
+        tgOpts.buttons = cid => buildStrategyButtons({ stratName, symCode: sym, tf, chatId: cid });
+      } else if (cat === 'general') {
+        tgOpts.buttons = cid => buildGeneralButtons(cid);
+      }
+      const r = await sendTelegram(body.text, null, null, false, tgOpts);
       return send(req, res, 200, sanitizeTgSendResult(r));
     }
     if (p === '/api/cloud-strats') {
@@ -1428,15 +1476,14 @@ async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
 
           if (!openTrades.length) {
             const resp = [
-              '📊 <b>TRADEX POSITION STATUS</b>',
-              '━━━━━━━━━━━━━━━━━━━━━',
-              '⚡ <b>Open Positions</b>: 0 active',
-              `🤖 <b>Cloud Strategies</b>: ${cloudStrats.length} running 24/7`,
-              `📈 <b>Market</b>: ${marketOpenNow() ? 'OPEN' : 'CLOSED'} (${timeStr} IST)`,
-              '',
-              'All strategies are flat (no active positions). Alerts will fire automatically on the next entry/exit.'
+              '⌬ <b>POSITION MATRIX // FLAT</b>',
+              '<pre><code class="language-POSITIONS">ACTIVE     ▸ 0 OPEN TRADES\n' +
+              `ENGINES    ▸ ${cloudStrats.length} SCANNING 24/7\n` +
+              `MARKET     ▸ ${marketOpenNow() ? 'OPEN' : 'CLOSED'}\n` +
+              `CLOCK      ▸ ${timeStr} IST</code></pre>`,
+              '<blockquote>◈ <i>No active exposure · Armed for next trigger</i></blockquote>'
             ].join('\n');
-            sendTelegramSingle(token, chatId, resp).catch(() => {});
+            sendTelegramSingle(token, chatId, resp, buildGeneralButtons(chatId)).catch(() => {});
           } else {
             const lines = openTrades.map((ot, idx) => {
               const tr = ot.trade;
@@ -1446,25 +1493,24 @@ async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
               const pts = tr.pts != null ? tr.pts : 0;
               const ptsStr = `${pts >= 0 ? '+' : '−'}${Math.abs(pts).toFixed(2)} Pts.`;
               const entryTime = fmtAlertTime(tr.et);
-              const candles = tr.bars != null ? `${tr.bars} candle${tr.bars === 1 ? '' : 's'}` : '';
+              const candles = tr.bars != null ? tr.bars : (tr.xi != null && tr.ei != null ? Math.max(1, tr.xi - tr.ei) : 1);
+              const slStr = tr.sl != null ? tr.sl.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—';
+              const tpStr = tr.tp != null ? tr.tp.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '—';
               return [
-                `<b>${idx + 1}. ${icon} ${ot.symName} (${ot.tf}m) — ${dir}</b>`,
-                `   • Strategy: <i>${ot.stratName}</i>`,
-                `   • Entry: ${ep} Pts. (${entryTime} IST)`,
-                `   • Current PnL: <b>${ptsStr}</b>${candles ? ` (${candles})` : ''}`,
-                tr.sl != null ? `   • Trailing SL: ${tr.sl.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : '',
-                tr.tp != null ? `   • Target: ${tr.tp.toLocaleString('en-IN', { minimumFractionDigits: 2 })} Pts.` : ''
-              ].filter(Boolean).join('\n');
+                `${icon} <b>#${idx + 1} · ${dir} ${escHtml(ot.symName)}</b> <code>${ot.tf}M</code> <i>[${escHtml(ot.stratName)}]</i>`,
+                '<pre><code class="language-LIVE_TRADE">' +
+                `PNL    ▸ ${ptsStr} (${candles} bars)\n` +
+                `ENTRY  ▸ ${ep} @ ${entryTime} IST\n` +
+                `TRAIL  ▸ SL ${slStr}  |  TP ${tpStr}</code></pre>`
+              ].join('\n');
             });
 
             const resp = [
-              `📊 <b>TRADEX OPEN POSITIONS (${openTrades.length})</b>`,
-              '━━━━━━━━━━━━━━━━━━━━━',
+              `⌬ <b>POSITION MATRIX // ${openTrades.length} LIVE</b>\n`,
               lines.join('\n\n'),
-              '━━━━━━━━━━━━━━━━━━━━━',
-              `⏰ As of: ${timeStr} IST`
+              `<blockquote>◈ <i>Synced at ${timeStr} IST · Tap /info to refresh</i></blockquote>`
             ].join('\n');
-            sendTelegramSingle(token, chatId, resp).catch(() => {});
+            sendTelegramSingle(token, chatId, resp, buildGeneralButtons(chatId)).catch(() => {});
           }
         } else if (text === '/status' || text === 'status' || text === '/market' || text === 'market') {
           const d = new Date(Date.now() + IST * 1000);
@@ -1475,27 +1521,29 @@ async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
           const today = dayOf(Math.floor(Date.now() / 1000));
           const nSum = getDailyMarketSummary('NIFTY', today);
           const bSum = getDailyMarketSummary('BANKNIFTY', today);
-          const fmtLine = (icon, label, sum) => {
-            if (!sum || !sum.close) return `${icon} <b>${label}</b>: —`;
-            const chg = sum.pct != null ? ` (${sum.diff >= 0 ? '+' : ''}${sum.diff.toFixed(2)} | ${sum.diff >= 0 ? '+' : ''}${sum.pct.toFixed(2)}%)` : '';
-            const extra = (sum.open != null && sum.low != null && sum.high != null)
-              ? `\n   <i>Open:</i> ${sum.open.toFixed(2)} | <i>Range:</i> ${sum.low.toFixed(2)} – ${sum.high.toFixed(2)}`
-              : '';
-            return `${icon} <b>${label}</b>: ${sum.close.toFixed(2)} Pts.${chg}${extra}`;
-          };
+          const f = v => (v != null && Number.isFinite(v)) ? v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+          const nDiff = nSum && nSum.diff != null ? `${nSum.diff >= 0 ? '+' : ''}${nSum.diff.toFixed(2)}` : '—';
+          const nPct = nSum && nSum.pct != null ? `${nSum.pct >= 0 ? '+' : ''}${nSum.pct.toFixed(2)}%` : '—';
+          const bDiff = bSum && bSum.diff != null ? `${bSum.diff >= 0 ? '+' : ''}${bSum.diff.toFixed(2)}` : '—';
+          const bPct = bSum && bSum.pct != null ? `${bSum.pct >= 0 ? '+' : ''}${bSum.pct.toFixed(2)}%` : '—';
+          const nRange = (nSum && nSum.low != null && nSum.high != null) ? `${f(nSum.low)} – ${f(nSum.high)}` : '—';
+          const bRange = (bSum && bSum.low != null && bSum.high != null) ? `${f(bSum.low)} – ${f(bSum.high)}` : '—';
+
           const resp = [
-            '⚡ <b>TRADEX SYSTEM STATUS</b>',
-            '━━━━━━━━━━━━━━━━━━━━━',
-            `📈 <b>Market Status</b>: ${marketOpenNow() ? 'OPEN ✅' : 'CLOSED ⏸️'}`,
-            `⏰ <b>Server Time</b>: ${timeStr} IST`,
-            fmtLine('🎯', 'NIFTY 50', nSum),
-            fmtLine('🏦', 'BANK NIFTY', bSum),
-            `🤖 <b>Cloud Strategies</b>: ${cloudStrats.length} active`,
-            `🔔 <b>Alert Notifications</b>: ${telegramConfig.enabled ? 'Enabled' : 'Disabled'}`,
-            '━━━━━━━━━━━━━━━━━━━━━',
-            'Send /info to view open trades • /market for live quotes.'
+            `⌬ <b>TRADEX CORE // ${marketOpenNow() ? 'OPEN' : 'CLOSED'}</b>`,
+            '<pre><code class="language-TELEMETRY">' +
+            `NIFTY 50   ▸ ${f(nSum && nSum.close)} (${nDiff} | ${nPct})\n` +
+            `  ├─ O: ${f(nSum && nSum.open)}\n` +
+            `  └─ R: ${nRange}\n\n` +
+            `BANK NIFTY ▸ ${f(bSum && bSum.close)} (${bDiff} | ${bPct})\n` +
+            `  ├─ O: ${f(bSum && bSum.open)}\n` +
+            `  └─ R: ${bRange}\n\n` +
+            `ENGINES    ▸ ${cloudStrats.length} CLOUD ACTIVE\n` +
+            'ALERTS     ▸ ENABLED\n' +
+            `CLOCK      ▸ ${timeStr} IST</code></pre>`,
+            '<blockquote>◈ <i>Tap /info for live positions · /market to ping</i></blockquote>'
           ].join('\n');
-          sendTelegramSingle(token, chatId, resp).catch(() => {});
+          sendTelegramSingle(token, chatId, resp, buildGeneralButtons(chatId)).catch(() => {});
         } else if (['/strategies', '/strategy', '/strategies_on', '/strategy_on', '/strategies_off', '/strategy_off'].includes(text)) {
           let nextState;
           if (text.endsWith('_on') || ['on', 'start', 'enable', '1', 'yes'].includes(arg)) {
@@ -1522,39 +1570,33 @@ async function pollTelegramUpdates(timeoutSec = 2, allowWhenDisabled = false) {
 
           const resp = nextState
             ? [
-                '✅ <b>LIVE STRATEGY ALERTS: ON</b>',
-                '━━━━━━━━━━━━━━━━━━━━━',
-                '🚀 You will now receive real-time cloud strategy <b>BUY / SELL entries</b> and <b>exit PnL</b> alerts on your Telegram every trading day.',
-                '',
-                '<i>Exclusive to your Telegram chat only.</i>',
-                'Tap /strategies_off (or /strategies) anytime to stop.'
+                '🟢 <b>SIGNAL FEED // ARMED</b>',
+                '<pre><code class="language-STATUS">ENTRY ALERTS ▸ ON\n' +
+                'EXIT PNL     ▸ ON\n' +
+                'SCOPE        ▸ THIS CHAT ONLY</code></pre>',
+                '<blockquote>◈ <i>Real-time cloud triggers active · /strategies_off to mute</i></blockquote>'
               ].join('\n')
             : [
-                '⏸️ <b>LIVE STRATEGY ALERTS: OFF</b>',
-                '━━━━━━━━━━━━━━━━━━━━━',
-                '🔕 Live strategy entry &amp; exit alerts are turned off for your Telegram.',
-                '✅ Market Open / Close summaries (09:15 &amp; 15:30 IST) and /status / /info commands remain active.',
-                '',
-                '<i>Exclusive to your Telegram chat only.</i>',
-                'Tap /strategies_on (or /strategies) anytime to turn them back ON.'
+                '⏸️ <b>SIGNAL FEED // STANDBY</b>',
+                '<pre><code class="language-STATUS">ENTRY ALERTS ▸ MUTED\n' +
+                'MARKET BRIEF ▸ ACTIVE (09:15 / 15:31)\n' +
+                'COMMANDS     ▸ ONLINE</code></pre>',
+                '<blockquote>◈ <i>Tap /strategies_on anytime to re-arm live triggers</i></blockquote>'
               ].join('\n');
-          sendTelegramSingle(token, chatId, resp).catch(() => {});
+          sendTelegramSingle(token, chatId, resp, buildGeneralButtons(chatId)).catch(() => {});
         } else if (text === '/help' || text === '/start') {
           const stratOn = isStrategyAlertsEnabled(chatId);
+          const alertState = stratOn ? '<b>ON ✅</b>' : '<b>OFF ⏸️</b> (send /strategies_on to enable)';
           const resp = [
-            '🤖 <b>TradeX Terminal Bot</b>',
-            '━━━━━━━━━━━━━━━━━━━━━',
-            '<b>Available Commands:</b>',
-            '• /strategies — Start or stop live strategy BUY/SELL &amp; exit alerts (your chat only)',
-            '   ↳ /strategies_on  |  /strategies_off',
-            '• /status or /market — View live NIFTY 50 &amp; BANK NIFTY market data &amp; market state',
-            '• /info — View active trade positions &amp; running strategy details',
-            '• /help — Show this commands guide',
-            '━━━━━━━━━━━━━━━━━━━━━',
-            `🔔 <b>Your Live Strategy Alerts:</b> ${stratOn ? '<b>ON ✅</b>' : '<b>OFF ⏸️</b> (send /strategies_on to enable)'}`,
-            '📡 Market Open/Close summaries (09:15 / 15:31 IST) are delivered automatically.'
+            '⌬ <b>TRADEX TERMINAL // COMMAND DECK</b>',
+            '<pre><code class="language-COMMANDS">/strategies  ▸ Arm / mute live signals\n' +
+            '/status      ▸ Live NIFTY &amp; BANKNIFTY feed\n' +
+            '/info        ▸ Open trades &amp; trail levels\n' +
+            '/help        ▸ Show command deck</code></pre>',
+            `<blockquote>◈ <b>Live Feed:</b> ${alertState}\n` +
+            '◈ <b>Auto Briefs:</b> <code>09:15 &amp; 15:31 IST</code></blockquote>'
           ].join('\n');
-          sendTelegramSingle(token, chatId, resp).catch(() => {});
+          sendTelegramSingle(token, chatId, resp, buildGeneralButtons(chatId)).catch(() => {});
         }
       }
     }
