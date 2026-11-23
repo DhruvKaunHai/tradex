@@ -1286,7 +1286,39 @@ const server = http.createServer(async (req, res) => {
         }
         return send(req, res, 200, { ok: true, count: added.length, strat: added[0], strats: added });
       }
-      return send(req, res, 200, { ok: true, strats: cloudStrats.map(s => ({ id: s.id, name: s.name, symbol: s.symbol, tf: s.tf, inputs: s.inputs, enabled: s.enabled !== false, createdAt: s.createdAt, lastError: s.lastError })) });
+      const qId = u.searchParams.get('id');
+      if (qId) {
+        const s = cloudStrats.find(x => x.id === qId);
+        if (!s) return send(req, res, 404, { error: 'Strategy not found' });
+        return send(req, res, 200, {
+          ok: true,
+          strat: {
+            id: s.id,
+            name: s.name,
+            symbol: s.symbol,
+            tf: s.tf,
+            code: s.code || '',
+            inputs: s.inputs,
+            enabled: s.enabled !== false,
+            createdAt: s.createdAt,
+            lastError: s.lastError
+          }
+        });
+      }
+      return send(req, res, 200, {
+        ok: true,
+        strats: cloudStrats.map(s => ({
+          id: s.id,
+          name: s.name,
+          symbol: s.symbol,
+          tf: s.tf,
+          code: s.code || '',
+          inputs: s.inputs,
+          enabled: s.enabled !== false,
+          createdAt: s.createdAt,
+          lastError: s.lastError
+        }))
+      });
     }
     if (p === '/api/cloud-strats/delete' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req));
