@@ -1111,6 +1111,11 @@ async function readBody(req, limit = 1048576) {
   for await (const ch of req) { size += ch.length; if (size > limit) throw new Error('Body too large'); chunks.push(ch); }
   return Buffer.concat(chunks).toString('utf8');
 }
+async function readJson(req, limit = 1048576) {
+  const raw = await readBody(req, limit);
+  if (!raw || !raw.trim()) return {};
+  try { return JSON.parse(raw); } catch { return {}; }
+}
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -1170,7 +1175,7 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/telegram/config') {
       if (req.method === 'POST') {
-        const body = JSON.parse(await readBody(req));
+        const body = await readJson(req);
         if (body.token) telegramConfig.token = String(body.token).trim();
         const newlyAddedFriends = [];
         if (body.extraChatIds !== undefined) {
@@ -1202,7 +1207,7 @@ const server = http.createServer(async (req, res) => {
       return send(req, res, 200, { ok: true, config: publicTgConfig() });
     }
     if (p === '/api/telegram/friends/add' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = await readJson(req);
       const rawInput = body.chatIds !== undefined ? body.chatIds : body.chatId;
       const tokens = Array.isArray(rawInput)
         ? rawInput.map(s => String(s || '').trim()).filter(Boolean)
@@ -1237,7 +1242,7 @@ const server = http.createServer(async (req, res) => {
       return send(req, res, 200, { ok: true, config: publicTgConfig(), results });
     }
     if (p === '/api/telegram/friends/remove' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = await readJson(req);
       const cid = isValidChatId(body.chatId);
       if (!cid) return send(req, res, 400, { ok: false, error: 'Invalid Telegram Chat ID.', config: publicTgConfig() });
       if (OWNER_CHAT_IDS.includes(cid)) {
@@ -1251,7 +1256,7 @@ const server = http.createServer(async (req, res) => {
       return send(req, res, 200, r);
     }
     if (p === '/api/telegram/test' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = await readJson(req);
       const targetChat = body.chatId ? String(body.chatId).trim() : null;
       const d = new Date(Date.now() + IST * 1000);
       let h = d.getUTCHours(), m = d.getUTCMinutes(), sec = d.getUTCSeconds();
@@ -1270,7 +1275,7 @@ const server = http.createServer(async (req, res) => {
       return send(req, res, 200, sanitizeTgSendResult(r));
     }
     if (p === '/api/telegram/send' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = await readJson(req);
       if (!telegramConfig.enabled) return send(req, res, 200, { ok: false, skipped: 'disabled' });
       if (body.type === 'entry' && !telegramConfig.notifyEntries) return send(req, res, 200, { ok: false, skipped: 'entries_off' });
       if (body.type === 'exit' && !telegramConfig.notifyExits) return send(req, res, 200, { ok: false, skipped: 'exits_off' });
@@ -1295,7 +1300,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/cloud-strats') {
       if (req.method === 'POST') {
-        const body = JSON.parse(await readBody(req));
+        const body = await readJson(req);
         const list = Array.isArray(body) ? body : Array.isArray(body.strats) ? body.strats : [body];
         const added = [];
         for (const b of list) {
@@ -1369,14 +1374,14 @@ const server = http.createServer(async (req, res) => {
       });
     }
     if (p === '/api/cloud-strats/delete' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = await readJson(req);
       const ids = Array.isArray(body.ids) ? body.ids : (body.id ? [body.id] : []);
       cloudStrats = cloudStrats.filter(s => !ids.includes(s.id));
       saveCloudStrats();
       return send(req, res, 200, { ok: true, deleted: ids.length });
     }
     if (p === '/api/cloud-strats/toggle' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req));
+      const body = await readJson(req);
       const s = cloudStrats.find(x => x.id === body.id);
       if (s) {
         s.enabled = body.enabled !== undefined ? !!body.enabled : !s.enabled;
